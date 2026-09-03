@@ -13,7 +13,7 @@ from typing import Any
 
 import duckdb
 
-from alpha_research_os.factors import build_initial_catalog
+from alpha_research_os.factors import build_initial_catalog, build_m4_2_catalog
 from alpha_research_os.factors.assets import (
     DatasetLineage,
     FactorAssetRef,
@@ -24,6 +24,7 @@ from alpha_research_os.factors.sql import expression_manifest_to_duckdb
 from alpha_research_os.kernel.canonical import canonical_json_bytes, content_hash
 
 ENGINE_VERSION = "duckdb-feature-sql-1.0.0"
+M42_ENGINE_VERSION = "duckdb-feature-sql-1.1.0-adjusted-price"
 SIGNAL_CLOCK_VERSION = "cn-close-postclose-v1"
 
 
@@ -66,8 +67,17 @@ def _lineage(connection: duckdb.DuckDBPyConnection) -> tuple[DatasetLineage, ...
     return tuple(sorted(result, key=lambda item: item.manifest_table))
 
 
-def _request(connection: duckdb.DuckDBPyConnection, start: date, end: date) -> tuple[FactorAssetRequest, Any]:
-    catalog = build_initial_catalog()
+def _request(
+    connection: duckdb.DuckDBPyConnection, start: date, end: date, catalog_profile: str = "initial"
+) -> tuple[FactorAssetRequest, Any]:
+    if catalog_profile == "initial":
+        catalog = build_initial_catalog()
+        engine_version = ENGINE_VERSION
+    elif catalog_profile == "m4.2":
+        catalog = build_m4_2_catalog()
+        engine_version = M42_ENGINE_VERSION
+    else:
+        raise ValueError(f"unknown catalog profile: {catalog_profile}")
     references = tuple(
         sorted(
             (
@@ -88,7 +98,7 @@ def _request(connection: duckdb.DuckDBPyConnection, start: date, end: date) -> t
         item.checkpoint_hashes[0] for item in lineage if item.manifest_table == "metadata.m2b_archive_manifest"
     )
     request = FactorAssetRequest(
-        engine_version=ENGINE_VERSION,
+        engine_version=engine_version,
         factors=references,
         dataset_lineage=lineage,
         universe_id="ALL-A-PIT",
@@ -113,6 +123,25 @@ def _warmup_start(connection: duckdb.DuckDBPyConnection, start: date, history: i
 
 
 def _materialization_sql(catalog: Any, request: FactorAssetRequest, target: Path, warmup_start: date) -> str:
+    return _bounded_materialization_sql(
+        catalog,
+        request,
+        target,
+        warmup_start,
+        output_start=request.start,
+        output_end=request.end,
+    )
+
+
+def _bounded_materialization_sql(
+    catalog: Any,
+    request: FactorAssetRequest,
+    target: Path,
+    warmup_start: date,
+    *,
+    output_start: date,
+    output_end: date,
+) -> str:
     window = "PARTITION BY instrument_id ORDER BY session"
     expressions = []
     factor_ids = []
@@ -137,6 +166,8 @@ def _materialization_sql(catalog: Any, request: FactorAssetRequest, target: Path
               u.ts_code AS instrument_id,
               u.eligible_for_signal,
               m.open, m.high, m.low, m.close, m.volume_shares,
+              CASE WHEN a.adj_factor > 0 THEN m.open * a.adj_factor END AS adjusted_open,
+              CASE WHEN a.adj_factor > 0 THEN m.close * a.adj_factor END AS adjusted_close,
               CASE WHEN m.pre_close > 0 THEN m.close / m.pre_close - 1 END AS return_1d,
               CASE WHEN m.pre_close > 0 AND m.amount_cny > 0
                    THEN abs(m.close / m.pre_close - 1) / m.amount_cny END AS illiquidity_1d,
@@ -146,6 +177,7 @@ def _materialization_sql(catalog: Any, request: FactorAssetRequest, target: Path
               f.roe, f.debt_to_assets
             FROM research.universe_daily u
             LEFT JOIN research.market_daily m USING (trade_date, ts_code)
+            LEFT JOIN research.adj_factor a USING (trade_date, ts_code)
             LEFT JOIN research.daily_basic b USING (trade_date, ts_code)
             LEFT JOIN LATERAL (
               SELECT p.roe, p.debt_to_assets
@@ -158,7 +190,7 @@ def _materialization_sql(catalog: Any, request: FactorAssetRequest, target: Path
               LIMIT 1
             ) f ON true
             WHERE u.trade_date BETWEEN DATE {_sql_string(warmup_start.isoformat())}
-                                   AND DATE {_sql_string(request.end.isoformat())}
+                                   AND DATE {_sql_string(output_end.isoformat())}
           ), computed AS (
             SELECT *, {", ".join(expressions)} FROM feature_input
           ), long_values AS (
@@ -172,8 +204,8 @@ def _materialization_sql(catalog: Any, request: FactorAssetRequest, target: Path
               unnest([{value_columns}]) AS candidate_value,
               unnest([{", ".join(implementation_hashes)}]) AS implementation_hash
             FROM computed
-            WHERE session BETWEEN DATE {_sql_string(request.start.isoformat())}
-                              AND DATE {_sql_string(request.end.isoformat())}
+            WHERE session BETWEEN DATE {_sql_string(output_start.isoformat())}
+                              AND DATE {_sql_string(output_end.isoformat())}
               AND eligible_for_signal
           )
           SELECT
@@ -185,6 +217,77 @@ def _materialization_sql(catalog: Any, request: FactorAssetRequest, target: Path
           ORDER BY session, instrument_id, factor_id, factor_version
         ) TO '{path}' (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 6, ROW_GROUP_SIZE 122880)
     """
+
+
+def _year_ranges(start: date, end: date) -> tuple[tuple[date, date], ...]:
+    return tuple(
+        (max(start, date(year, 1, 1)), min(end, date(year, 12, 31)))
+        for year in range(start.year, end.year + 1)
+    )
+
+
+def _configure_bounded_connection(connection: duckdb.DuckDBPyConnection, temporary_directory: Path) -> None:
+    temporary_directory.mkdir(parents=True, exist_ok=True)
+    connection.execute("SET TimeZone='Asia/Shanghai'")
+    connection.execute("SET memory_limit='10GB'")
+    connection.execute(f"SET temp_directory='{_sql_path(temporary_directory)}'")
+
+
+def _materialize_yearly(
+    database: Path,
+    store: Path,
+    catalog: Any,
+    request: FactorAssetRequest,
+    target: Path,
+    max_history: int,
+) -> None:
+    staging = target.parent / "yearly_staging"
+    staging.mkdir(parents=True, exist_ok=True)
+    partition_paths: list[Path] = []
+    for output_start, output_end in _year_ranges(request.start, request.end):
+        partition = staging / f"year={output_start.year}.parquet"
+        partition_paths.append(partition)
+        if partition.exists():
+            with duckdb.connect() as connection:
+                identity, lower, upper = connection.execute(
+                    f"""SELECT min(release_id),min(session),max(session)
+                    FROM read_parquet('{_sql_path(partition)}')"""
+                ).fetchone()
+            if (
+                identity == request.computation_key
+                and lower is not None
+                and output_start <= lower <= upper <= output_end
+            ):
+                print(f"year={output_start.year} cache_hit", flush=True)
+                continue
+            raise ValueError(f"invalid yearly staging partition: {partition}")
+        with duckdb.connect(str(database), read_only=True) as connection:
+            _configure_bounded_connection(connection, store / "duckdb_tmp")
+            warmup_start = _warmup_start(connection, output_start, max_history)
+            print(f"year={output_start.year} materializing", flush=True)
+            temporary = partition.with_name(f".{partition.stem}.{uuid.uuid4().hex}.tmp.parquet")
+            connection.execute(
+                _bounded_materialization_sql(
+                    catalog,
+                    request,
+                    temporary,
+                    warmup_start,
+                    output_start=output_start,
+                    output_end=output_end,
+                )
+            )
+        os.replace(temporary, partition)
+    parquet_list = ",".join(_sql_string(_sql_path(path)) for path in partition_paths)
+    with duckdb.connect() as connection:
+        _configure_bounded_connection(connection, store / "duckdb_tmp")
+        print("combining yearly partitions", flush=True)
+        connection.execute(
+            f"""COPY (SELECT * FROM read_parquet([{parquet_list}])) TO '{_sql_path(target)}'
+            (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 6, ROW_GROUP_SIZE 122880)"""
+        )
+    for partition in partition_paths:
+        partition.unlink()
+    staging.rmdir()
 
 
 def _quality(path: Path, factor_count: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -244,6 +347,7 @@ def _register(
     manifest_hash: str,
     catalog: Any,
     quality_details: list[dict[str, Any]],
+    catalog_profile: str,
 ) -> None:
     connection = duckdb.connect(str(database))
     try:
@@ -289,6 +393,23 @@ def _register(
             factor_count BIGINT, row_count BIGINT, quality_status VARCHAR, request_json JSON,
             created_at TIMESTAMPTZ)"""
         )
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS metadata.factor_version_disposition (
+            factor_id VARCHAR, factor_version VARCHAR, disposition VARCHAR, successor_version VARCHAR,
+            reason VARCHAR, decision_stage VARCHAR, recorded_at TIMESTAMPTZ,
+            PRIMARY KEY (factor_id, factor_version))"""
+        )
+        if catalog_profile == "m4.2":
+            for factor_id in ("price-momentum-20", "short-reversal-5", "overnight-gap-1"):
+                connection.execute(
+                    """INSERT OR IGNORE INTO metadata.factor_version_disposition VALUES
+                    (?, '1.0.0', 'SUPERSEDED_DIAGNOSTIC', '2.0.0', ?, 'M4.2', ?)""",
+                    [
+                        factor_id,
+                        "Raw historical price ratio is mechanically sensitive to ex-right adjustment-factor jumps.",
+                        manifest.created_at,
+                    ],
+                )
         relative_path = manifest.parquet_relative_path
         existing_release = connection.execute(
             "SELECT manifest_hash, parquet_hash FROM metadata.factor_release_manifest WHERE release_id=?",
@@ -355,9 +476,11 @@ def _register(
         connection.close()
 
 
-def publish(database: Path, store: Path, start: date, end: date) -> dict[str, Any]:
+def publish(
+    database: Path, store: Path, start: date, end: date, catalog_profile: str = "initial"
+) -> dict[str, Any]:
     with duckdb.connect(str(database), read_only=True) as connection:
-        request, catalog = _request(connection, start, end)
+        request, catalog = _request(connection, start, end, catalog_profile)
         max_history = max(
             item.compiled_expression.required_history
             for item in catalog.registry.list()
@@ -373,14 +496,17 @@ def publish(database: Path, store: Path, start: date, end: date) -> dict[str, An
         if manifest.request != request or _sha256_file(parquet) != manifest.parquet_hash:
             raise ValueError("cached factor release failed immutable identity verification")
         quality = json.loads(quality_path.read_bytes())
-        _register(database, store, manifest, content_hash(manifest), catalog, quality["factors"])
+        _register(database, store, manifest, content_hash(manifest), catalog, quality["factors"], catalog_profile)
         return {"cache_hit": True, "release_id": manifest.release_id, "manifest": str(manifest_path.resolve())}
 
     release_dir.mkdir(parents=True, exist_ok=True)
     temporary = release_dir / f".raw_factor_values.{uuid.uuid4().hex}.tmp.parquet"
-    with duckdb.connect(str(database), read_only=True) as connection:
-        connection.execute("SET TimeZone='Asia/Shanghai'")
-        connection.execute(_materialization_sql(catalog, request, temporary, warmup_start))
+    if (end - start).days > 370:
+        _materialize_yearly(database, store, catalog, request, temporary, max_history)
+    else:
+        with duckdb.connect(str(database), read_only=True) as connection:
+            _configure_bounded_connection(connection, store / "duckdb_tmp")
+            connection.execute(_materialization_sql(catalog, request, temporary, warmup_start))
     quality, quality_details = _quality(temporary, len(request.factors))
     os.replace(temporary, parquet)
     _atomic_write(quality_path, canonical_json_bytes(quality))
@@ -399,7 +525,7 @@ def publish(database: Path, store: Path, start: date, end: date) -> dict[str, An
     )
     _atomic_write(manifest_path, canonical_json_bytes(manifest))
     manifest_hash = content_hash(manifest)
-    _register(database, store, manifest, manifest_hash, catalog, quality_details)
+    _register(database, store, manifest, manifest_hash, catalog, quality_details, catalog_profile)
     return {
         "cache_hit": False,
         "release_id": manifest.release_id,
@@ -419,8 +545,15 @@ def main() -> int:
     parser.add_argument("--store", type=Path, default=Path("data/factor_store"))
     parser.add_argument("--start", type=date.fromisoformat, default=date(2024, 1, 2))
     parser.add_argument("--end", type=date.fromisoformat, default=date(2024, 3, 29))
+    parser.add_argument("--catalog-profile", choices=("initial", "m4.2"), default="initial")
     args = parser.parse_args()
-    print(json.dumps(publish(args.database, args.store, args.start, args.end), ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            publish(args.database, args.store, args.start, args.end, args.catalog_profile),
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     return 0
 
 

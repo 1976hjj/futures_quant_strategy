@@ -1,8 +1,8 @@
 # Alpha Research OS 实施计划
 
-状态：Active implementation — M2-E extended-data backfill + M4.1 Label and basic Evidence Factory
+状态：Active implementation — M2-E extended-data backfill + M4.4 walk-forward/regime evidence completed
 项目范围：A 股、日频、横截面因子研究  
-最后更新：2026-09-03
+最后更新：2026-09-04
 
 ## 1. 项目目标
 
@@ -177,7 +177,7 @@ Phase 1 已实现白名单 Feature AST 编译器、编译依赖与声明依赖�
 
 M3.2 已完成表达式因子的按实验 RAW 物化与发布：计算键绑定因子规范/实现、M2 checkpoint 血缘、Universe、日期、变体、预处理和信号钟；Parquet 资产不可变存放，DuckDB 保存 Registry、Release Manifest 和质量摘要。首个正式 ALL-A-PIT 发布覆盖 2024 年一季度 58 个交易日、5,250 只证券、13 个因子、3,944,590 行，独立资产审计通过，重复请求已验证命中缓存。
 
-M3.3 已完成受限 Python 插件沙箱：插件源码由白名单 AST 约束，禁止导入、文件/网络/环境变量、属性反射、下标和无限循环等逃逸面；执行使用独立 `python -I -S` 进程、空工作目录、净化环境、单子进程 Job/资源上限、超时杀死和严格输入输出协议。插件源码进入不可变 Artifact Store，并登记至 `metadata.python_plugin_registry` 与 Factor Registry。分支型哨兵插件已在 M2 正式数据的 3 只证券、5 个交易日上完成 15 行重放，7 类攻击探针全部拒绝，独立审计通过。M3.4 对 M2-A～M2-D 的正式数据接入已验收；依赖 M2-E 历史行业数据的中性化变体待 M2-E 发布后补验。M4 收益证据尚未开始，因此任何因子都未被认定为有效或进入 Core Pool。
+M3.3 已完成受限 Python 插件沙箱：插件源码由白名单 AST 约束，禁止导入、文件/网络/环境变量、属性反射、下标和无限循环等逃逸面；执行使用独立 `python -I -S` 进程、空工作目录、净化环境、单子进程 Job/资源上限、超时杀死和严格输入输出协议。插件源码进入不可变 Artifact Store，并登记至 `metadata.python_plugin_registry` 与 Factor Registry。分支型哨兵插件已在 M2 正式数据的 3 只证券、5 个交易日上完成 15 行重放，7 类攻击探针全部拒绝，独立审计通过。M3.4 对 M2-A～M2-D 的正式数据接入已验收；依赖 M2-E 历史行业数据的中性化变体待 M2-E 发布后补验。M4 已开始生成描述性证据，但任何因子仍未被认定为有效或进入 Core Pool。
 
 ### M4：最小 Evidence Factory
 
@@ -188,6 +188,12 @@ M3.3 已完成受限 Python 插件沙箱：插件源码由白名单 AST 约束�
 - 生成 Evidence Bundle 和 Suspicious Result Audit。
 
 M4.1 已完成第一版 Label 与描述性证据链：冻结 T 日收盘后信号、T+1 固定开盘入场、T+6 固定收盘退出的 5-session 复权总收益标签；缺失、停牌或不可交易边界不顺延而是显式失效。已实现日度 Pearson IC、平均秩 RankIC、覆盖率、五分组收益和上下分组换手，并生成不可变 Label Release 与 Evidence Bundle。正式 Q1 验收包含 303,430 个标签、754 行日度因子证据、3,770 行分组收益和 13 行因子摘要；独立 Python 与 DuckDB 交叉计算一致。当前标签明确为 `BAR_AND_SUSPENSION_ONLY`，在 M2-E 涨跌停价、退市收益、成本、HAC、多重检验和 OOS 完成前，证据状态固定为 `DESCRIPTIVE_ONLY_NOT_OOS`，不得据此晋级因子。
+
+M4.2 已完成公司行动口径修正和第一版 processed 资产链。20 日动量、5 日反转、隔夜跳空发布为使用 `price × adj_factor` 的 2.0.0，旧 1.0.0 永久保留并登记为 `SUPERSEDED_DIAGNOSTIC`。修正 RAW、`WINSORIZED_ZSCORE` 和 `SIZE_NEUTRALIZED` 各自拥有独立计算键、Parquet、Manifest、质量摘要和 Evidence Bundle；逐日标准化误差与规模暴露残余均通过独立复算门禁。行业中性化仍等待 M2-E 历史申万成员正式发布，不使用当前行业倒填历史。详见 `docs/m4_2_corrected_and_processed_factors.md`。
+
+M4.3 已完成短窗口稳健统计资产：冻结日度 RankIC 为主指标、Newey–West/Bartlett 5 阶滞后、循环 moving-block bootstrap（块长 5、10,000 次、固定种子）、三段时间稳定性和双侧 BH-FDR。13 个因子 × 3 个变体共 39 个假设进入同一检验家族；HAC 与 bootstrap 经 FDR 后均为 0 个拒绝，系统没有据此晋级任何因子。该结果只说明 Q1 证据不足，不等价于证明因子永久无效。详见 `docs/m4_3_robust_statistical_evidence.md`。
+
+M4.4 已完成 2020-01-02～2025-12-31 长窗口、扩展训练窗的 Walk-Forward 与 PIT Regime 证据链。系统冻结 2023/2024/2025 三个测试 fold、5-session purge/embargo、训练期方向选择、HAC(5)、循环块自助法和覆盖全部 117 个 fold×因子×变体假设的统一 BH-FDR 家族，并在读取前写入不可逆 Holdout 暴露账本。2025 首次研究读取后已永久标记为暴露，不能再次声称为未见样本。独立审计通过但有重要发现：20 日动量三个变体在全部测试 fold 中均显著反向；RAW 与 `WINSORIZED_ZSCORE` 的秩检验高度重复；当前 Label 尚未纳入涨跌停、退市收益和交易成本。因此决策固定为 `NO_PROMOTION_DIAGNOSTIC_AND_PSEUDO_OOS`，任何因子仍不得进入 Core Pool。详见 `docs/m4_4_walk_forward_and_regime.md`。
 
 ### M5：Alpha158 接入
 

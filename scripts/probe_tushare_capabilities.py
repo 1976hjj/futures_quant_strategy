@@ -16,7 +16,11 @@ from urllib.request import Request, urlopen
 PROBES: tuple[tuple[str, str, dict[str, Any]], ...] = (
     ("每日涨跌停价", "stk_limit", {"trade_date": "20240808", "limit": 1}),
     ("指数基本信息", "index_basic", {"market": "SSE", "limit": 1}),
-    ("指数月度权重", "index_weight", {"index_code": "000300.SH", "start_date": "20240801", "end_date": "20240831", "limit": 1}),
+    (
+        "指数月度权重",
+        "index_weight",
+        {"index_code": "000300.SH", "start_date": "20240801", "end_date": "20240831", "limit": 1},
+    ),
     ("申万行业分类", "index_classify", {"level": "L1", "src": "SW2021", "limit": 1}),
     ("申万历史成分", "index_member_all", {"ts_code": "600036.SH", "limit": 1}),
     ("财报披露计划", "disclosure_date", {"ts_code": "600036.SH", "limit": 1}),
@@ -50,7 +54,10 @@ PROBES: tuple[tuple[str, str, dict[str, Any]], ...] = (
 
 
 def _post(endpoint: str, token: str, api_name: str, params: dict[str, Any]) -> dict[str, Any]:
-    payload = json.dumps({"api_name": api_name, "fields": "", "params": params, "token": token}, separators=(",", ":")).encode()
+    payload = json.dumps(
+        {"api_name": api_name, "fields": "", "params": params, "token": token},
+        separators=(",", ":"),
+    ).encode()
     request = Request(endpoint, data=payload, headers={"Content-Type": "application/json"}, method="POST")
     with urlopen(request, timeout=30) as response:
         return json.loads(response.read())
@@ -73,7 +80,17 @@ def _probe(endpoint: str, token: str, label: str, api_name: str, params: dict[st
                 status = "DENIED"
             else:
                 status = "API_ERROR"
-            return {"api_name": api_name, "code": code, "elapsed_ms": round((time.monotonic() - started) * 1000), "field_count": len(fields), "fields": fields, "label": label, "message": message, "returned_rows": len(items), "status": status}
+            return {
+                "api_name": api_name,
+                "code": code,
+                "elapsed_ms": round((time.monotonic() - started) * 1000),
+                "field_count": len(fields),
+                "fields": fields,
+                "label": label,
+                "message": message,
+                "returned_rows": len(items),
+                "status": status,
+            }
         except HTTPError as error:
             last_error = f"HTTP {error.code}"
             if error.code not in (429, 500, 502, 503, 504) or attempt == 3:
@@ -83,7 +100,13 @@ def _probe(endpoint: str, token: str, label: str, api_name: str, params: dict[st
             if attempt == 3:
                 break
         time.sleep(2 ** attempt * 2)
-    return {"api_name": api_name, "elapsed_ms": round((time.monotonic() - started) * 1000), "error": last_error, "label": label, "status": "TRANSPORT_ERROR"}
+    return {
+        "api_name": api_name,
+        "elapsed_ms": round((time.monotonic() - started) * 1000),
+        "error": last_error,
+        "label": label,
+        "status": "TRANSPORT_ERROR",
+    }
 
 
 def main() -> int:
@@ -104,7 +127,14 @@ def main() -> int:
     counts: dict[str, int] = {}
     for result in results:
         counts[result["status"]] = counts.get(result["status"], 0) + 1
-    report = {"endpoint": args.endpoint, "note": "Permission probe only; no returned business rows were persisted.", "probed_at": datetime.now().astimezone().isoformat(), "results": results, "schema": "tushare-capability-probe-v2", "summary": counts}
+    report = {
+        "endpoint": args.endpoint,
+        "note": "Permission probe only; no returned business rows were persisted.",
+        "probed_at": datetime.now().astimezone().isoformat(),
+        "results": results,
+        "schema": "tushare-capability-probe-v2",
+        "summary": counts,
+    }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output.with_name(f".{args.output.name}.{uuid.uuid4().hex}.tmp")
     temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

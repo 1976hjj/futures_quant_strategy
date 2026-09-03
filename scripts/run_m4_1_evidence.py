@@ -22,7 +22,7 @@ from alpha_research_os.evaluation import (
     LabelReleaseManifest,
     default_forward_5d_label_spec,
 )
-from alpha_research_os.factors.assets import FactorReleaseManifest
+from alpha_research_os.factors.assets import FactorReleaseManifest, ProcessedFactorReleaseManifest
 from alpha_research_os.kernel.canonical import canonical_json_bytes, content_hash
 
 LABEL_ENGINE_VERSION = "duckdb-forward-return-label-1.0.0"
@@ -53,10 +53,27 @@ def _sql_string(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def _factor_manifest(factor_store: Path, release_id: str) -> tuple[FactorReleaseManifest, Path]:
-    release_dir = factor_store / "releases" / release_id.removeprefix("sha256:")
-    manifest = FactorReleaseManifest.model_validate_json((release_dir / "manifest.json").read_bytes())
-    parquet = release_dir / manifest.parquet_relative_path.split("/", 2)[-1]
+def _configure_bounded_connection(connection: duckdb.DuckDBPyConnection, temporary_directory: Path) -> None:
+    temporary_directory.mkdir(parents=True, exist_ok=True)
+    connection.execute("SET TimeZone='Asia/Shanghai'")
+    connection.execute("SET memory_limit='10GB'")
+    connection.execute(f"SET temp_directory='{_sql_path(temporary_directory)}'")
+
+
+FactorInputManifest = FactorReleaseManifest | ProcessedFactorReleaseManifest
+
+
+def _factor_manifest(factor_store: Path, release_id: str) -> tuple[FactorInputManifest, Path]:
+    digest = release_id.removeprefix("sha256:")
+    raw_path = factor_store / "releases" / digest / "manifest.json"
+    processed_path = factor_store / "processed_releases" / digest / "manifest.json"
+    if raw_path.exists():
+        manifest: FactorInputManifest = FactorReleaseManifest.model_validate_json(raw_path.read_bytes())
+    elif processed_path.exists():
+        manifest = ProcessedFactorReleaseManifest.model_validate_json(processed_path.read_bytes())
+    else:
+        raise FileNotFoundError(f"factor release manifest not found: {release_id}")
+    parquet = factor_store / manifest.parquet_relative_path
     if manifest.release_id != release_id or _sha256_file(parquet) != manifest.parquet_hash:
         raise ValueError("factor release failed immutable input verification")
     return manifest, parquet
@@ -165,7 +182,7 @@ def _label_sql(
 def _publish_labels(
     database: Path,
     evidence_store: Path,
-    factor_manifest: FactorReleaseManifest,
+    factor_manifest: FactorInputManifest,
     factor_parquet: Path,
 ) -> tuple[LabelReleaseManifest, Path, bool]:
     label_spec = default_forward_5d_label_spec()
@@ -193,7 +210,7 @@ def _publish_labels(
     release_dir.mkdir(parents=True, exist_ok=True)
     temporary = release_dir / f".labels.{uuid.uuid4().hex}.tmp.parquet"
     with duckdb.connect(str(database), read_only=True) as connection:
-        connection.execute("SET TimeZone='Asia/Shanghai'")
+        _configure_bounded_connection(connection, evidence_store / "duckdb_tmp")
         connection.execute(
             _label_sql(
                 factor_parquet,
@@ -376,7 +393,7 @@ def _summary_sql(
 def _publish_evidence(
     database: Path,
     evidence_store: Path,
-    factor_manifest: FactorReleaseManifest,
+    factor_manifest: FactorInputManifest,
     factor_parquet: Path,
     label_manifest: LabelReleaseManifest,
     label_parquet: Path,
@@ -387,6 +404,7 @@ def _publish_evidence(
         label_release_id=label_manifest.release_id,
         quantile_count=5,
         minimum_pairs_per_session=20,
+        factor_variant=factor_manifest.request.variant,
     )
     bundle_dir = evidence_store / "bundles" / request.evidence_id.removeprefix("sha256:")
     manifest_path = bundle_dir / "manifest.json"
@@ -404,6 +422,7 @@ def _publish_evidence(
     bundle_dir.mkdir(parents=True, exist_ok=True)
     temporary = {name: path.with_name(f".{name}.{uuid.uuid4().hex}.tmp.parquet") for name, path in targets.items()}
     with duckdb.connect(str(database), read_only=True) as connection:
+        _configure_bounded_connection(connection, evidence_store / "duckdb_tmp")
         connection.execute(
             _daily_sql(factor_parquet, label_parquet, temporary["daily_metrics"], request.evidence_id, 20)
         )
@@ -578,8 +597,16 @@ def _register(
 
 def run(database: Path, factor_store: Path, evidence_store: Path, factor_release_id: str) -> dict[str, Any]:
     factor_manifest, factor_parquet = _factor_manifest(factor_store, factor_release_id)
+    label_source_manifest = factor_manifest
+    label_source_parquet = factor_parquet
+    if isinstance(factor_manifest, ProcessedFactorReleaseManifest):
+        parent_manifest, parent_parquet = _factor_manifest(factor_store, factor_manifest.request.parent_release_id)
+        if not isinstance(parent_manifest, FactorReleaseManifest):
+            raise ValueError("processed factor parent must be a RAW factor release")
+        label_source_manifest = parent_manifest
+        label_source_parquet = parent_parquet
     label_manifest, label_parquet, label_cache_hit = _publish_labels(
-        database, evidence_store, factor_manifest, factor_parquet
+        database, evidence_store, label_source_manifest, label_source_parquet
     )
     evidence_manifest, evidence_cache_hit = _publish_evidence(
         database,

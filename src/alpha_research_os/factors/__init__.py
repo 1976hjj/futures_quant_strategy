@@ -1,6 +1,14 @@
 """Factor specifications, runtimes, registry, artifacts, and preprocessing."""
 
-from .assets import DatasetLineage, FactorAssetRef, FactorAssetRequest, FactorReleaseManifest
+from .assets import (
+    DatasetLineage,
+    FactorAssetRef,
+    FactorAssetRequest,
+    FactorReleaseManifest,
+    PreprocessingSpec,
+    ProcessedFactorAssetRequest,
+    ProcessedFactorReleaseManifest,
+)
 from .catalog import (
     CatalogedFactor,
     FactorCatalog,
@@ -10,7 +18,7 @@ from .catalog import (
     FactorSourceKind,
 )
 from .expression import CompiledFeatureExpression, ExpressionDependency, compile_feature_expression
-from .library import build_initial_catalog, initial_factor_entries
+from .library import build_initial_catalog, build_m4_2_catalog, initial_factor_entries, m4_2_factor_entries
 from .plugin import (
     PluginRunResult,
     PluginSandboxLimits,
@@ -45,15 +53,20 @@ __all__ = [
     "ProcessedCrossSectionRow",
     "PluginRunResult",
     "PluginSandboxLimits",
+    "PreprocessingSpec",
+    "ProcessedFactorAssetRequest",
+    "ProcessedFactorReleaseManifest",
     "PythonPluginRuntime",
     "PythonPluginSource",
     "RawFactorValue",
     "RegisteredFactor",
     "build_initial_catalog",
+    "build_m4_2_catalog",
     "compile_feature_expression",
     "conditional_close_location_plugin",
     "expression_manifest_to_duckdb",
     "initial_factor_entries",
+    "m4_2_factor_entries",
     "process_cross_section",
     "publish_python_plugin",
 ]

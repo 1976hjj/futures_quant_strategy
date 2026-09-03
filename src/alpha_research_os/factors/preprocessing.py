@@ -49,21 +49,30 @@ def process_cross_section(
     rows: list[CrossSectionRow],
     *,
     mad_scale: float = 5.0,
+    mad_consistency_scale: float = 1.4826,
     neutralize_industry: bool = True,
     neutralize_log_size: bool = True,
 ) -> tuple[ProcessedCrossSectionRow, ...]:
     """MAD-winsorize, z-score, then regress out PIT industry fixed effects and log size."""
 
-    if mad_scale <= 0:
-        raise ValueError("mad_scale must be positive")
+    if mad_scale <= 0 or mad_consistency_scale <= 0:
+        raise ValueError("MAD scales must be positive")
     if len({row.instrument_id for row in rows}) != len(rows):
         raise ValueError("cross-section contains duplicate instruments")
     finite_values = [float(row.value) for row in rows if _finite(row.value)]
     if not finite_values:
         return tuple(ProcessedCrossSectionRow(row.instrument_id, row.value, None, None, None) for row in rows)
     center, mad = _median_absolute_deviation(finite_values)
-    lower, upper = center - mad_scale * mad, center + mad_scale * mad
-    winsorized = [None if not _finite(row.value) else min(upper, max(lower, float(row.value))) for row in rows]
+    robust_scale = mad_consistency_scale * mad
+    if robust_scale > 0:
+        lower, upper = center - mad_scale * robust_scale, center + mad_scale * robust_scale
+        winsorized = [
+            None if not _finite(row.value) else min(upper, max(lower, float(row.value))) for row in rows
+        ]
+    else:
+        # A zero MAD is common for sparse/discrete factors. Collapsing every non-median
+        # observation to the median would destroy information, so M4.2 preserves it.
+        winsorized = [None if not _finite(row.value) else float(row.value) for row in rows]
     standardized = _zscore(winsorized)
 
     industry_means: dict[str, float] = {}

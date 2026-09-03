@@ -4,7 +4,14 @@ from datetime import date
 
 from alpha_research_os.data.providers.tushare import TushareProvider
 from alpha_research_os.kernel.specs import DataDomain
-from scripts.backfill_tushare_m2e import Task, _request, _tasks
+from scripts.backfill_tushare_m2e import (
+    Task,
+    _adaptive_split,
+    _expand_adaptive_splits,
+    _offset_parameter_rejected,
+    _request,
+    _tasks,
+)
 
 
 def test_m2e_universe_request_uses_domain_contract_field() -> None:
@@ -46,3 +53,37 @@ def test_m2e_all_market_month_range_keeps_explicit_dates() -> None:
     assert params["index_code"] == "000300.SH"
     assert params["start_date"] == "20240101"
     assert params["end_date"] == "20240131"
+
+
+def test_m2e_share_float_high_offset_falls_back_to_daily_partitions() -> None:
+    parent = Task(
+        "share_float",
+        "201701",
+        date(2017, 1, 1),
+        date(2017, 1, 31),
+        ("start_date=20170101", "end_date=20170131"),
+        page_size=6000,
+    )
+
+    children = _adaptive_split(parent, ["600036.SH"])
+
+    assert len(children) == 31
+    assert children[0].key == "201701:day=20170101"
+    assert children[-1].params == ("start_date=20170131", "end_date=20170131")
+    assert _offset_parameter_rejected(RuntimeError("code=50101 msg=参数校验失败, offset"))
+
+
+def test_m2e_recorded_daily_split_can_fall_back_to_instruments() -> None:
+    parent = Task(
+        "share_float",
+        "201701",
+        date(2017, 1, 1),
+        date(2017, 1, 1),
+        ("start_date=20170101", "end_date=20170101"),
+        page_size=6000,
+    )
+    splits = {"share_float": {"201701": {"reason": "test"}}}
+
+    expanded = _expand_adaptive_splits([parent], splits, ["600036.SH", "000001.SZ"])
+
+    assert [task.instrument for task in expanded] == ["600036.SH", "000001.SZ"]

@@ -5,7 +5,13 @@ from datetime import date
 import duckdb
 import pytest
 
-from alpha_research_os.factors.assets import DatasetLineage, FactorAssetRef, FactorAssetRequest
+from alpha_research_os.factors.assets import (
+    DatasetLineage,
+    FactorAssetRef,
+    FactorAssetRequest,
+    PreprocessingSpec,
+    ProcessedFactorAssetRequest,
+)
 from alpha_research_os.factors.expression import compile_feature_expression
 from alpha_research_os.factors.sql import expression_manifest_to_duckdb
 
@@ -47,6 +53,51 @@ def test_factor_asset_references_must_be_sorted() -> None:
     values["factors"] = (_reference("alpha-b"), _reference("alpha-a"))
     with pytest.raises(ValueError, match="sorted and unique"):
         FactorAssetRequest(**values)
+
+
+def test_processed_factor_identity_binds_parent_and_preprocessing() -> None:
+    common = dict(
+        engine_version="processed-v1",
+        parent_release_id=DIGEST_A,
+        parent_parquet_hash=DIGEST_B,
+        dataset_lineage=(DatasetLineage(manifest_table="metadata.dataset", checkpoint_hashes=(DIGEST_A,)),),
+        universe_id="ALL-A-PIT",
+        universe_version="test-v1",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 31),
+        variant="WINSORIZED_ZSCORE",
+    )
+    first = ProcessedFactorAssetRequest(
+        **common,
+        preprocessing=PreprocessingSpec(
+            preprocessing_id="mad-zscore", preprocessing_version="1", neutralize_log_size=False
+        ),
+    )
+    changed = ProcessedFactorAssetRequest(
+        **common,
+        preprocessing=PreprocessingSpec(
+            preprocessing_id="mad-zscore", preprocessing_version="1", mad_multiplier=4, neutralize_log_size=False
+        ),
+    )
+    assert first.computation_key != changed.computation_key
+
+
+def test_processed_variant_must_match_neutralization_setting() -> None:
+    with pytest.raises(ValueError, match="variant and log-size"):
+        ProcessedFactorAssetRequest(
+            engine_version="processed-v1",
+            parent_release_id=DIGEST_A,
+            parent_parquet_hash=DIGEST_B,
+            dataset_lineage=(DatasetLineage(manifest_table="metadata.dataset", checkpoint_hashes=(DIGEST_A,)),),
+            universe_id="ALL-A-PIT",
+            universe_version="test-v1",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 31),
+            variant="SIZE_NEUTRALIZED",
+            preprocessing=PreprocessingSpec(
+                preprocessing_id="mad-zscore", preprocessing_version="1", neutralize_log_size=False
+            ),
+        )
 
 
 @pytest.mark.parametrize(

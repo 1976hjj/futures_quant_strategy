@@ -313,6 +313,67 @@ def hashlib_key(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()[:16]
 
 
+def _offset_parameter_rejected(error: Exception) -> bool:
+    message = str(error).lower()
+    return "code=50101" in message and "offset" in message
+
+
+def _adaptive_split(task: Task, securities: list[str]) -> list[Task]:
+    if task.api != "share_float":
+        return []
+    if task.start < task.end:
+        children = []
+        current = task.start
+        while current <= task.end:
+            value = current.strftime("%Y%m%d")
+            children.append(
+                Task(
+                    task.api,
+                    f"{task.key}:day={value}",
+                    current,
+                    current,
+                    (f"start_date={value}", f"end_date={value}"),
+                    page_size=task.page_size,
+                )
+            )
+            current = date.fromordinal(current.toordinal() + 1)
+        return children
+    if task.instrument is None:
+        value = task.start.strftime("%Y%m%d")
+        return [
+            Task(
+                task.api,
+                f"{task.key}:instrument={code}",
+                task.start,
+                task.end,
+                (f"start_date={value}", f"end_date={value}"),
+                instrument=code,
+                page_size=task.page_size,
+            )
+            for code in securities
+        ]
+    return []
+
+
+def _expand_adaptive_splits(
+    tasks: list[Task],
+    splits: dict[str, dict[str, object]],
+    securities: list[str],
+) -> list[Task]:
+    expanded: list[Task] = []
+    pending = list(tasks)
+    while pending:
+        task = pending.pop(0)
+        if task.key not in splits.get(task.api, {}):
+            expanded.append(task)
+            continue
+        children = _adaptive_split(task, securities)
+        if not children:
+            raise ValueError(f"recorded adaptive split cannot be reconstructed: {task.api} {task.key}")
+        pending[0:0] = children
+    return expanded
+
+
 def backfill(
     *,
     provider: TushareProvider,
@@ -340,10 +401,16 @@ def backfill(
     state["expected_base_partitions"] = max(int(state.get("expected_base_partitions", 0)), len(tasks))
     for api in (*CORE_APIS, *IMPORTANT_APIS):
         state.setdefault("completed", {}).setdefault(api, {})
+        state.setdefault("pagination_splits", {}).setdefault(api, {})
+    tasks = _expand_adaptive_splits(tasks, state["pagination_splits"], securities)
+    state["expected_base_partitions"] = max(int(state.get("expected_base_partitions", 0)), len(tasks))
     store = RawSnapshotStore(ArtifactStore(output / "artifacts"))
     fetched = 0
-    for task_index, task in enumerate(tasks, 1):
+    task_index = 0
+    while task_index < len(tasks):
+        task = tasks[task_index]
         offset = 0
+        split_applied = False
         while True:
             partition = f"{task.key}:offset={offset}"
             existing = state["completed"][task.api].get(partition)
@@ -356,11 +423,39 @@ def backfill(
             if free_gb < min_free_gb:
                 raise RuntimeError(f"disk safety stop: {free_gb:.2f} GiB is below {min_free_gb:.2f} GiB")
 
-            response = _fetch_with_retry(
-                provider,
-                _request(task, offset),
-                _observer(output, task.api, partition),
-            )
+            try:
+                response = _fetch_with_retry(
+                    provider,
+                    _request(task, offset),
+                    _observer(output, task.api, partition),
+                )
+            except Exception as error:
+                children = _adaptive_split(task, securities) if _offset_parameter_rejected(error) else []
+                if not children:
+                    raise
+                state["pagination_splits"][task.api][task.key] = {
+                    "child_count": len(children),
+                    "reason": "provider rejected high offset; replaced by narrower immutable partitions",
+                    "recorded_at": datetime.now().astimezone().isoformat(),
+                }
+                tasks[task_index : task_index + 1] = children
+                state["expected_base_partitions"] = max(state["expected_base_partitions"], len(tasks))
+                _atomic_write(checkpoint_path, canonical_json_bytes(state))
+                _save_status(
+                    output,
+                    api_name=task.api,
+                    completed_partitions=sum(len(value) for value in state["completed"].values()),
+                    expected_partitions=state["expected_base_partitions"],
+                    partition=partition,
+                    status="RUNNING",
+                )
+                print(
+                    f"M2-E adaptive pagination api={task.api} partition={partition} "
+                    f"replacement_tasks={len(children)}",
+                    flush=True,
+                )
+                split_applied = True
+                break
             document = json.loads(response.payload)
             fields = document.get("data", {}).get("fields")
             rows = tushare_response_rows(response.payload)
@@ -392,8 +487,8 @@ def backfill(
                 partition=partition,
                 status="RUNNING",
             )
-            if fetched == 1 or fetched % 10 == 0 or task_index == len(tasks):
-                progress = f"M2-E progress {task_index}/{len(tasks)} pages={completed}"
+            if fetched == 1 or fetched % 10 == 0 or task_index + 1 == len(tasks):
+                progress = f"M2-E progress {task_index + 1}/{len(tasks)} pages={completed}"
                 detail = f"api={task.api} partition={partition} rows={len(rows)}"
                 print(f"{progress} {detail}", flush=True)
             if sleep_seconds:
@@ -401,6 +496,8 @@ def backfill(
             if len(rows) < task.page_size:
                 break
             offset += task.page_size
+        if not split_applied:
+            task_index += 1
     totals = {
         api: {"partitions": len(entries), "rows": sum(int(entry["rows"]) for entry in entries.values())}
         for api, entries in state["completed"].items()
