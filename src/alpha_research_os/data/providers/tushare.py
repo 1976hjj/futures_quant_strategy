@@ -394,7 +394,8 @@ class TushareProvider:
             params.setdefault("start_date", request.start.strftime("%Y%m%d"))
             params.setdefault("end_date", request.end.strftime("%Y%m%d"))
             return params
-        if request.start != request.end and "period" not in params:
+        has_explicit_range = "start_date" in params and "end_date" in params
+        if request.start != request.end and "period" not in params and not has_explicit_range:
             raise ValueError("all-market raw requests must target one date or provide an explicit period")
         if not any(key in params for key in ("period", "trade_date", "ann_date", "start_date", "end_date")):
             date_parameter = "trade_date" if endpoint not in {"dividend", "namechange"} else "ann_date"

@@ -1,6 +1,6 @@
 # Alpha Research OS 实施计划
 
-状态：Active implementation — M2 real-provider backfill + M3 Factor Factory Phase 1  
+状态：Active implementation — M2-E extended-data backfill + M4.1 Label and basic Evidence Factory
 项目范围：A 股、日频、横截面因子研究  
 最后更新：2026-09-03
 
@@ -173,7 +173,11 @@ label spec + universe spec + split spec -> evaluator
 - 5 至 10 个哨兵因子及人工 golden cases；
 - RAW 与 processed artifact 分离。
 
-Phase 1 已实现白名单 Feature AST 编译器、编译依赖与声明依赖逐项对账、规范 AST 实现哈希、不可变内存 Registry、feature-only 表达式运行时，以及 5 个带人工 golden case 的哨兵因子。Python 插件目前只允许登记，执行由门禁阻断；RAW factor artifact 正式发布、插件进程沙箱和 M2 正式数据版本集成仍待完成，因此 M3 尚未关闭。
+Phase 1 已实现白名单 Feature AST 编译器、编译依赖与声明依赖逐项对账、规范 AST 实现哈希、不可变 Registry、feature-only 表达式运行时，以及 5 个带人工 golden case 的哨兵因子。M3-A 又增加了外部来源与生命周期治理、13 个首批候选/复现因子、MAD 去极值/标准化/行业与规模中性化组件，并完成绑定 M2-A～M2-D checkpoint 的真实数据竖切。
+
+M3.2 已完成表达式因子的按实验 RAW 物化与发布：计算键绑定因子规范/实现、M2 checkpoint 血缘、Universe、日期、变体、预处理和信号钟；Parquet 资产不可变存放，DuckDB 保存 Registry、Release Manifest 和质量摘要。首个正式 ALL-A-PIT 发布覆盖 2024 年一季度 58 个交易日、5,250 只证券、13 个因子、3,944,590 行，独立资产审计通过，重复请求已验证命中缓存。
+
+M3.3 已完成受限 Python 插件沙箱：插件源码由白名单 AST 约束，禁止导入、文件/网络/环境变量、属性反射、下标和无限循环等逃逸面；执行使用独立 `python -I -S` 进程、空工作目录、净化环境、单子进程 Job/资源上限、超时杀死和严格输入输出协议。插件源码进入不可变 Artifact Store，并登记至 `metadata.python_plugin_registry` 与 Factor Registry。分支型哨兵插件已在 M2 正式数据的 3 只证券、5 个交易日上完成 15 行重放，7 类攻击探针全部拒绝，独立审计通过。M3.4 对 M2-A～M2-D 的正式数据接入已验收；依赖 M2-E 历史行业数据的中性化变体待 M2-E 发布后补验。M4 收益证据尚未开始，因此任何因子都未被认定为有效或进入 Core Pool。
 
 ### M4：最小 Evidence Factory
 
@@ -182,6 +186,8 @@ Phase 1 已实现白名单 Feature AST 编译器、编译依赖与声明依赖�
 - 与 jqfactor_analyzer/Qlib 在明确相同假设下交叉验证；
 - Newey-West、block bootstrap 和 BH-FDR 的第一版；
 - 生成 Evidence Bundle 和 Suspicious Result Audit。
+
+M4.1 已完成第一版 Label 与描述性证据链：冻结 T 日收盘后信号、T+1 固定开盘入场、T+6 固定收盘退出的 5-session 复权总收益标签；缺失、停牌或不可交易边界不顺延而是显式失效。已实现日度 Pearson IC、平均秩 RankIC、覆盖率、五分组收益和上下分组换手，并生成不可变 Label Release 与 Evidence Bundle。正式 Q1 验收包含 303,430 个标签、754 行日度因子证据、3,770 行分组收益和 13 行因子摘要；独立 Python 与 DuckDB 交叉计算一致。当前标签明确为 `BAR_AND_SUSPENSION_ONLY`，在 M2-E 涨跌停价、退市收益、成本、HAC、多重检验和 OOS 完成前，证据状态固定为 `DESCRIPTIVE_ONLY_NOT_OOS`，不得据此晋级因子。
 
 ### M5：Alpha158 接入
 

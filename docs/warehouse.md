@@ -73,6 +73,9 @@ data/warehouse/
 - `research.adjustment_factor_jumps`：复权因子跳变与行情参考比；
 - `research.corporate_action_reconciliation_approved`：通过时间与数值对账门禁的公司行动白名单；
 - `research.corporate_action_reconciliation_exceptions`：未解释、证据不全或误差超限的隔离记录。
+- `research.factor_values_raw`：已发布因子资产的研究入口，保留 RAW 值和 `is_present` 缺失标志；其物理数据位于 `data/factor_store/releases/`。
+- `research.forward_return_labels`：按信号日保存的固定入场/退出复权收益、有效性和失效原因；
+- `research.factor_evidence_summary`：按 Evidence Bundle 发布的因子描述性摘要，当前不代表 OOS 或晋级结论。
 
 因子和标签代码应优先依赖 `research` 层。需要复核供应商字段或追溯证据时才直接查询 `raw` 层。
 
@@ -82,6 +85,12 @@ data/warehouse/
 - `metadata.column_dictionary`：关键字段单位和说明；
 - `metadata.data_quality_summary`：已识别的数据质量问题及数量。
 - `metadata.m2b_archive_manifest`：M2-B 各参考数据域的行数、checkpoint 哈希、PIT 等级和发布时间。
+- `metadata.factor_registry`：不可变因子规范、实现哈希、来源、家族和生命周期；
+- `metadata.factor_release_manifest`：每次因子发布的计算身份、数据范围、文件哈希、行数和质量状态；
+- `metadata.factor_quality_summary`：每个发布、每个因子的覆盖率、非空数和数值范围。
+- `metadata.python_plugin_registry`：受限 Python 插件的实现哈希、入口、沙箱策略、源码 Artifact 和不可变版本登记。
+- `metadata.label_release_manifest`：LabelSpec、执行约束级别、因子发布来源、文件哈希和有效/失效数量；
+- `metadata.evidence_bundle_manifest`：因子发布、标签发布、评价器版本、限制条件和证据文件登记。
 
 ## 5. 常用 SQL
 
