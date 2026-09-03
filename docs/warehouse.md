@@ -159,4 +159,6 @@ python scripts\audit_market_warehouse.py `
 
 ## 7. 当前边界
 
-这套数据库已完成 M2-A 核心日频数据、M2-B 历史证券状态/Universe，以及 M2-C 公司行动/复权对账。完整 M2 现在只剩 M2-D：财务报表 PIT 与修订版本。
+这套数据库已完成 M2-A 核心日频数据、M2-B 历史证券状态/Universe、M2-C 公司行动/复权对账，以及 M2-D 财务报表 PIT 与修订版本。M2-E 扩展数据正在回填，完成审计前不会发布为正式研究输入。
+
+M2-D 新增四个原始全字段视图：`raw.income_statement_versions`、`raw.balance_sheet_versions`、`raw.cashflow_statement_versions`、`raw.financial_indicator_versions`。研究入口为 `research.financial_versions_canonical`、`research.financial_revision_events`、`research.financial_pit_asof` 和 `research.financial_pit_exceptions`。

@@ -57,8 +57,31 @@ _ENDPOINT_DOMAINS = {
     "cashflow_vip": DataDomain.FUNDAMENTAL,
     "fina_indicator": DataDomain.FUNDAMENTAL,
     "fina_indicator_vip": DataDomain.FUNDAMENTAL,
+    "disclosure_date": DataDomain.FUNDAMENTAL,
+    "forecast": DataDomain.FUNDAMENTAL,
+    "forecast_vip": DataDomain.FUNDAMENTAL,
+    "express": DataDomain.FUNDAMENTAL,
+    "express_vip": DataDomain.FUNDAMENTAL,
+    "fina_audit": DataDomain.FUNDAMENTAL,
+    "fina_mainbz": DataDomain.FUNDAMENTAL,
+    "fina_mainbz_vip": DataDomain.FUNDAMENTAL,
+    "stk_holdernumber": DataDomain.FUNDAMENTAL,
+    "top10_holders": DataDomain.FUNDAMENTAL,
+    "top10_floatholders": DataDomain.FUNDAMENTAL,
     "dividend": DataDomain.CORPORATE_ACTION,
+    "share_float": DataDomain.CORPORATE_ACTION,
+    "repurchase": DataDomain.CORPORATE_ACTION,
+    "stk_holdertrade": DataDomain.CORPORATE_ACTION,
+    "pledge_stat": DataDomain.CORPORATE_ACTION,
+    "pledge_detail": DataDomain.CORPORATE_ACTION,
+    "index_basic": DataDomain.UNIVERSE,
+    "index_classify": DataDomain.UNIVERSE,
+    "index_member_all": DataDomain.UNIVERSE,
     "index_weight": DataDomain.UNIVERSE,
+    "margin": DataDomain.MARKET,
+    "margin_detail": DataDomain.MARKET,
+    "margin_secs": DataDomain.MARKET,
+    "hk_hold": DataDomain.MARKET,
 }
 
 _DEFAULT_ENDPOINTS = {
@@ -373,7 +396,7 @@ class TushareProvider:
             return params
         if request.start != request.end and "period" not in params:
             raise ValueError("all-market raw requests must target one date or provide an explicit period")
-        if "period" not in params:
+        if not any(key in params for key in ("period", "trade_date", "ann_date", "start_date", "end_date")):
             date_parameter = "trade_date" if endpoint not in {"dividend", "namechange"} else "ann_date"
             params.setdefault(date_parameter, request.start.strftime("%Y%m%d"))
         return params

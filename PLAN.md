@@ -162,7 +162,7 @@ label spec + universe spec + split spec -> evaluator
 - Data Auditor 和 severity gate；
 - 发布第一个可研究数据版本。
 
-当前已接入 AKShare、BaoStock 和 Tushare 兼容 HTTP 网关，支持压缩 raw snapshot、断点续传和 Token 隔离。M2-A 行情/复权因子/每日基础数据、M2-B 历史证券状态/ST/停牌/Universe、M2-C 公司行动/复权对账均已回填、发布并通过审计。完整 M2 现在只剩真实财务 PIT 与修订版本（M2-D）。
+当前已接入 AKShare、BaoStock 和 Tushare 兼容 HTTP 网关，支持压缩 raw snapshot、断点续传和 Token 隔离。M2-A 行情/复权因子/每日基础数据、M2-B 历史证券状态/ST/停牌/Universe、M2-C 公司行动/复权对账、M2-D 财务 PIT 与修订版本均已回填、发布并通过审计。M2-E 交易约束、历史行业/指数、披露链与重要筹码数据已启动全历史回填。
 
 ### M3：最小 Factor Factory
 

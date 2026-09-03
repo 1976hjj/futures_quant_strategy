@@ -126,6 +126,15 @@ class StatusTracker:
         return (last_total - first_total) / (last_time - first_time) * 3600
 
     def _expected_partitions(self, state: dict[str, Any]) -> int:
+        if state.get("schema") == "tushare-m2e-backfill-v1":
+            completed = sum(len(partitions) for partitions in state.get("completed", {}).values())
+            base = int(state.get("expected_base_partitions", self.expected))
+            full_pages = sum(
+                int(entry.get("rows", 0)) == int(entry.get("page_size", -1))
+                for partitions in state.get("completed", {}).values()
+                for entry in partitions.values()
+            )
+            return max(1, base + full_pages, completed)
         if state.get("schema") == "tushare-financial-backfill-v1":
             entries = [
                 entry
