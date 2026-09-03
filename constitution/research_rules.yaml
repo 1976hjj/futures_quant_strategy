@@ -1,0 +1,281 @@
+constitution:
+  id: alpha-research-os
+  version: "1.0.0-draft"
+  effective_date: "2026-08-31"
+  scope:
+    - data
+    - factors
+    - models
+    - portfolios
+    - backtests
+    - reports
+    - agents
+  precedence: highest
+  governance:
+    automated_write_allowed: false
+    owner_approval_required: true
+    changes_require_new_version: true
+    historical_experiments_pin_version: true
+    protected_paths:
+      - RESEARCH_CONSTITUTION.md
+      - constitution/research_rules.yaml
+
+rules:
+  - id: RULE-001
+    title: 禁止未来数据
+    severity: blocker
+    statement: 决策不得使用决策时点以后才可知的信息。
+    enforcement:
+      - feature_runtime_no_future_reference
+      - point_in_time_query_guard
+
+  - id: RULE-002
+    title: 以信息可用时间为准
+    severity: blocker
+    statement: 任何信号只能使用 available_at 不晚于 signal_cutoff 的记录。
+    enforcement:
+      - asof_join_required
+      - availability_audit
+
+  - id: RULE-003
+    title: 收盘信息不得按同一收盘价成交
+    severity: blocker
+    statement: 使用 T 日收盘后确认信息的信号，默认最早在 T+1 首个合法可成交事件执行。
+    enforcement:
+      - signal_order_fill_clock_test
+
+  - id: RULE-004
+    title: 财务数据按实际披露进入系统
+    severity: blocker
+    statement: 财务事实必须保留报告期、披露时间、可用时间和修订版本。
+    enforcement:
+      - financial_asof_test
+      - revision_lineage_test
+
+  - id: RULE-005
+    title: Feature 与 Label 隔离
+    severity: blocker
+    statement: Feature runtime 禁止未来引用且无权访问 Label 数据。
+    enforcement:
+      - typed_expression_guard
+      - process_capability_test
+
+  - id: RULE-006
+    title: 股票池必须 Point-In-Time
+    severity: blocker
+    statement: 股票池不得使用未来成分信息。
+    enforcement:
+      - universe_asof_test
+
+  - id: RULE-007
+    title: 退市证券不得从历史消失
+    severity: blocker
+    statement: 历史研究必须包含当时存在且后来退市的证券。
+    enforcement:
+      - survivorship_test
+
+  - id: RULE-008
+    title: 状态必须历史化
+    severity: blocker
+    statement: 禁止使用当前 ST、停牌、行业、板块或名称状态过滤历史。
+    enforcement:
+      - security_status_asof_test
+
+  - id: RULE-009
+    title: 公司行为与复权必须可追溯
+    severity: blocker
+    statement: 复权不得隐含研究时点未知的未来公司行为。
+    enforcement:
+      - corporate_action_lineage_test
+      - adjustment_reconciliation
+
+  - id: RULE-010
+    title: 数据错误阻断依赖研究
+    severity: blocker
+    statement: Data Audit blocker 必须停止依赖受影响数据域的正式研究。
+    enforcement:
+      - dataset_release_gate
+
+  - id: RULE-011
+    title: Test 不参与选择
+    severity: blocker
+    statement: Test 不得用于因子、方向、参数、预处理、模型或阈值选择。
+    enforcement:
+      - split_capability_guard
+      - exposure_ledger
+
+  - id: RULE-012
+    title: 预处理仅在允许样本拟合
+    severity: blocker
+    statement: 需要估计参数的预处理只能在 Train 拟合并冻结后应用于 Validation 和 Test。
+    enforcement:
+      - fit_scope_test
+
+  - id: RULE-013
+    title: 重叠标签必须 purge 和 embargo
+    severity: blocker
+    statement: Forward label 跨越切分边界时必须 purge，并按预注册配置 embargo。
+    enforcement:
+      - split_overlap_test
+
+  - id: RULE-014
+    title: 因子方向不能全样本决定
+    severity: blocker
+    statement: 数据决定的因子方向只能在 Train 内确定并冻结。
+    enforcement:
+      - direction_fit_scope_test
+
+  - id: RULE-015
+    title: 所有搜索必须记录
+    severity: major
+    statement: 参数、窗口、Universe、horizon、variant、因子、模型和组合尝试必须记录。
+    enforcement:
+      - search_manifest_required
+
+  - id: RULE-016
+    title: Holdout 暴露不可逆
+    severity: blocker
+    statement: Holdout 读取必须登记，已暴露区间不得重新声明为未见样本。
+    enforcement:
+      - holdout_capability_guard
+      - exposure_ledger
+
+  - id: RULE-017
+    title: 单个 p-value 不能证明有效
+    severity: major
+    statement: 大量候选同时测试时不得仅以原始 p-value 判定有效。
+    enforcement:
+      - multiple_testing_gate
+
+  - id: RULE-018
+    title: 检验家族必须预注册
+    severity: major
+    statement: Multiple-testing family 必须在查看结果前冻结。
+    enforcement:
+      - test_family_manifest_required
+
+  - id: RULE-019
+    title: 相关样本不得假装独立
+    severity: major
+    statement: 重叠收益、窗口、Fold、序列和横截面依赖必须进入推断设计。
+    enforcement:
+      - dependence_audit
+
+  - id: RULE-020
+    title: 事后 Regime 只用于诊断
+    severity: blocker
+    statement: 事后市场状态不得直接用于交易决策。
+    enforcement:
+      - regime_usage_guard
+
+  - id: RULE-021
+    title: 异常优秀结果强制审计
+    severity: blocker
+    statement: 异常高 IC、收益或 Sharpe 必须进入 Suspicious Result Audit。
+    enforcement:
+      - suspicious_result_trigger
+
+  - id: RULE-022
+    title: Signal Order Fill 必须分离
+    severity: blocker
+    statement: 最终策略收益必须可追踪到信号、订单、成交和持仓。
+    enforcement:
+      - order_lifecycle_required
+
+  - id: RULE-023
+    title: A 股交易规则按历史生效
+    severity: blocker
+    statement: T+1、涨跌停、ST、停牌、上市和退市规则必须使用历史有效版本。
+    enforcement:
+      - historical_market_rule_test
+
+  - id: RULE-024
+    title: 无成本结果不得标记 Tradable
+    severity: blocker
+    statement: 未完成费用、滑点和换手测试不得标记为 TRADABLE。
+    enforcement:
+      - tradable_gate
+
+  - id: RULE-025
+    title: 无流动性和容量结果不得标记 Deployable
+    severity: blocker
+    statement: 未完成成交金额、参与率、冲击和资金规模测试不得标记为 DEPLOYABLE。
+    enforcement:
+      - deployable_gate
+
+  - id: RULE-026
+    title: 失败实验永久记录
+    severity: blocker
+    statement: 失败、无效、冗余和被推翻实验不得删除或隐藏。
+    enforcement:
+      - append_only_experiment_log
+
+  - id: RULE-027
+    title: 原始 artifact 不得覆盖
+    severity: blocker
+    statement: Raw 数据、RAW 因子、实验规格、结果和审计记录只能追加新版本。
+    enforcement:
+      - immutable_artifact_store
+
+  - id: RULE-028
+    title: 状态变化必须有证据事件
+    severity: major
+    statement: 因子状态变化必须绑定实验、证据和授权事件。
+    enforcement:
+      - event_sourced_status
+
+  - id: RULE-029
+    title: 无 OOS 不得标记 Validated
+    severity: blocker
+    statement: 没有严格 OOS 结果不得标记为 VALIDATED。
+    enforcement:
+      - validated_gate
+
+  - id: RULE-030
+    title: 审计门槛不得因结果改变
+    severity: blocker
+    statement: 不得为使实验通过而事后降低阈值或重新定义检验。
+    enforcement:
+      - frozen_gate_manifest
+
+  - id: RULE-031
+    title: 报告不是事实来源
+    severity: major
+    statement: 报告必须从结构化 Evidence Bundle 生成，不能反写实验事实。
+    enforcement:
+      - report_read_only_projection
+
+  - id: RULE-032
+    title: 外部实现必须独立验证
+    severity: major
+    statement: 开源、论文、供应商和公开因子实现均不得免于独立验证。
+    enforcement:
+      - external_reference_crosscheck
+
+  - id: RULE-033
+    title: Agent 是受限研究用户
+    severity: blocker
+    statement: Agent 不得拥有管理员或数据所有者权限。
+    enforcement:
+      - least_privilege_agent_role
+
+  - id: RULE-034
+    title: Agent 禁止修改事实与规则
+    severity: blocker
+    statement: Agent 禁止修改宪法、历史实验、数据、失败档案和审计记录。
+    enforcement:
+      - protected_write_guard
+
+  - id: RULE-035
+    title: Agent 禁止读取未释放 Holdout
+    severity: blocker
+    statement: Agent 不得直接或间接读取或推断未释放 Holdout。
+    enforcement:
+      - holdout_isolation_test
+
+  - id: RULE-036
+    title: Agent 不得自行晋级
+    severity: blocker
+    statement: Agent 只能提交晋级建议，不能自行产生 CORE 或 DEPLOYABLE 状态。
+    enforcement:
+      - promotion_authorization_gate

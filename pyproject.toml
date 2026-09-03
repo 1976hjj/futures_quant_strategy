@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "alpha-research-os"
+version = "0.1.0"
+description = "Auditable point-in-time A-share alpha research system"
+requires-python = ">=3.11"
+dependencies = [
+  "duckdb>=1.5,<2",
+  "pydantic>=2.10,<3",
+  "pyarrow>=18,<24",
+]
+
+[project.optional-dependencies]
+data-free = [
+  "akshare>=1.18,<2",
+  "baostock>=0.9,<1",
+]
+data-tushare = [
+  "tushare>=1.4,<2",
+]
+dev = [
+  "hypothesis>=6.125",
+  "pytest>=8.3",
+  "pyyaml>=6.0",
+  "ruff>=0.9",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/alpha_research_os"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra --strict-markers"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

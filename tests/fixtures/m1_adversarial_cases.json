@@ -1,0 +1,94 @@
+{
+  "signal_cutoff": "2024-04-29T15:00:00+08:00",
+  "as_of_records": [
+    {
+      "source_record_id": "SAFE-PRICE-001",
+      "published_at": "2024-04-29T15:00:00+08:00",
+      "available_at": "2024-04-29T15:00:00+08:00",
+      "ingested_at": "2024-04-29T15:00:00+08:00",
+      "included": true
+    },
+    {
+      "source_record_id": "POISON-FINANCIAL-EARLY-001",
+      "published_at": "2024-04-30T18:00:00+08:00",
+      "available_at": "2024-04-29T18:00:00+08:00",
+      "ingested_at": "2024-04-30T18:05:00+08:00",
+      "included": true
+    },
+    {
+      "source_record_id": "POISON-FUTURE-AVAILABLE-001",
+      "published_at": "2024-04-29T14:00:00+08:00",
+      "available_at": "2024-04-30T09:00:00+08:00",
+      "ingested_at": "2024-04-30T09:01:00+08:00",
+      "included": true
+    },
+    {
+      "source_record_id": "POISON-LATE-INGEST-001",
+      "published_at": "2024-04-29T14:00:00+08:00",
+      "available_at": "2024-04-29T14:00:00+08:00",
+      "ingested_at": "2024-04-29T16:00:00+08:00",
+      "included": true
+    }
+  ],
+  "signal_execution_cases": [
+    {
+      "case_id": "SAFE-NEXT-OPEN",
+      "uses_session_close": true,
+      "signal_session": "2024-04-29",
+      "execution_session": "2024-04-30",
+      "execution_event": "OPEN",
+      "information_available_at": "2024-04-29T15:00:00+08:00",
+      "execution_at": "2024-04-30T09:30:00+08:00"
+    },
+    {
+      "case_id": "POISON-SAME-CLOSE",
+      "uses_session_close": true,
+      "signal_session": "2024-04-29",
+      "execution_session": "2024-04-29",
+      "execution_event": "CLOSE",
+      "information_available_at": "2024-04-29T15:00:00+08:00",
+      "execution_at": "2024-04-29T15:00:00+08:00"
+    },
+    {
+      "case_id": "POISON-BEFORE-INFORMATION",
+      "uses_session_close": false,
+      "signal_session": "2024-04-29",
+      "execution_session": "2024-04-29",
+      "execution_event": "CLOSE",
+      "information_available_at": "2024-04-29T18:00:00+08:00",
+      "execution_at": "2024-04-29T15:00:00+08:00"
+    }
+  ],
+  "label_samples": [
+    {
+      "sample_id": "TRAIN-SAFE-001",
+      "split": "train",
+      "observation_at": "2024-06-20T15:00:00+08:00",
+      "label_end_at": "2024-06-27T15:00:00+08:00"
+    },
+    {
+      "sample_id": "TRAIN-OVERLAP-001",
+      "split": "train",
+      "observation_at": "2024-06-28T15:00:00+08:00",
+      "label_end_at": "2024-07-04T15:00:00+08:00"
+    },
+    {
+      "sample_id": "VALIDATION-OVERLAP-001",
+      "split": "validation",
+      "observation_at": "2024-07-29T15:00:00+08:00",
+      "label_end_at": "2024-08-05T15:00:00+08:00"
+    },
+    {
+      "sample_id": "TEST-NO-PURGE-001",
+      "split": "test",
+      "observation_at": "2024-08-01T15:00:00+08:00",
+      "label_end_at": "2024-08-08T15:00:00+08:00"
+    }
+  ],
+  "future_m2_cases": {
+    "delisted_instrument": "CN-EQ-DELISTED-001",
+    "historical_st_change": "CN-EQ-ST-HISTORY-001",
+    "limit_up_buy_blocked": "CN-EQ-LIMIT-UP-001",
+    "limit_down_sell_blocked": "CN-EQ-LIMIT-DOWN-001"
+  }
+}

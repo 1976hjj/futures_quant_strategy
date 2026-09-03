@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Environments and local configuration
+.venv/
+.env
+.env.*
+!.env.example
+
+# IDE and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Runtime data: directory markers and documentation remain tracked
+data/**
+!data/**/
+!data/**/.gitkeep
+artifacts/**
+!artifacts/**/
+!artifacts/**/.gitkeep
+reports/**
+!reports/**/
+!reports/**/.gitkeep
+
+# Local databases, logs and generated reports
+*.duckdb
+*.duckdb.wal
+*.sqlite
+*.sqlite3
+*.parquet
+*.feather
+*.log
+
+# Research runtime output; curated Markdown records may be committed
+research/experiments/**
+!research/experiments/**/
+!research/experiments/**/.gitkeep
+
+# Secrets and vendor credentials
+credentials/
+secrets/
+*.pem
+*.key
+
