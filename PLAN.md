@@ -1,6 +1,6 @@
 # Alpha Research OS 实施计划
 
-状态：Active implementation — M2-E extended-data backfill + M4.4 walk-forward/regime evidence completed
+状态：Active implementation — M2-E extended-data backfill + M4.5 redundancy/incremental evidence completed
 项目范围：A 股、日频、横截面因子研究  
 最后更新：2026-09-04
 
@@ -18,11 +18,13 @@
 ```text
 Data ingest -> Data audit -> Factor proposal -> Factor validation
 -> Robustness -> Multiple testing -> Redundancy/incremental value
--> Cost/OOS -> Promotion or graveyard -> Portfolio research
+-> Cost/OOS -> Evidence routing -> Feature/Model research
 -> Attribution -> Research memory -> Next hypothesis
 ```
 
 研究可信度高于收益率。异常优秀结果默认进入怀疑性审计。
+
+单因子证据卡用于理解、比较、组合与证伪，不是模型特征的永久淘汰器。只有未来数据、PIT 违规、实现错误、不可修复的数据错误等研究完整性失败，才能禁止某个因子进入模型研究；单因子不显著、方向相反或线性增量不足，只限制其独立 Alpha 声明，不取消其作为非线性模型候选特征的资格。
 
 ## 2. 第一版明确边界
 
@@ -195,48 +197,62 @@ M4.3 已完成短窗口稳健统计资产：冻结日度 RankIC 为主指标、N
 
 M4.4 已完成 2020-01-02～2025-12-31 长窗口、扩展训练窗的 Walk-Forward 与 PIT Regime 证据链。系统冻结 2023/2024/2025 三个测试 fold、5-session purge/embargo、训练期方向选择、HAC(5)、循环块自助法和覆盖全部 117 个 fold×因子×变体假设的统一 BH-FDR 家族，并在读取前写入不可逆 Holdout 暴露账本。2025 首次研究读取后已永久标记为暴露，不能再次声称为未见样本。独立审计通过但有重要发现：20 日动量三个变体在全部测试 fold 中均显著反向；RAW 与 `WINSORIZED_ZSCORE` 的秩检验高度重复；当前 Label 尚未纳入涨跌停、退市收益和交易成本。因此决策固定为 `NO_PROMOTION_DIAGNOSTIC_AND_PSEUDO_OOS`，任何因子仍不得进入 Core Pool。详见 `docs/m4_4_walk_forward_and_regime.md`。
 
-### M5：Alpha158 接入
+M4.5 已完成因子值/日度 IC 相关、变体去重、平均连接层次聚类、机械代表项、条件/正交 RankIC 与相对其他簇代表集合的增量证据。39 条因子×变体路径中，13 组 RAW/`WINSORIZED_ZSCORE` 被确认近重复，`book-to-price` 的规模中性路径也达到冻结去重阈值；最终保留 25 条 canonical 路径并形成 10 个信息簇。25 个统一检验假设中，volume-shock、return-volatility 和 M4.4 后设的反向 price-momentum 路径在已暴露样本内仍保留条件方向证据，但这不是新的 OOS 确认，簇代表也不自动晋级。资产决策固定为 `NO_PROMOTION_REDUNDANCY_DIAGNOSTIC`，独立审计为 `PASS_WITH_FINDINGS`。详见 `docs/m4_5_redundancy_and_incremental_value.md`。
 
-- 逐公式映射、版本和来源；
-- 单元测试、随机人工样本与 Qlib 对照；
-- 不允许整库一次性无验证导入；
-- 输出公式差异和无法等价复现清单。
+M4.1～M4.5 与 M4.7 Explorer 已统一接入配置化批处理入口 `scripts/run_m4_pipeline.py`。因子集合从不可变 release 自动发现，窗口、fold、检验 family、processed variants、方向覆盖和重点证伪均由机器校验的 JSON 配置声明；审计不再写死因子或日期。当前配置见 `config/m4_pipeline_current.json`，操作与扩展边界见 `docs/m4_pipeline.md`。同一请求优先校验并复用内容寻址缓存，不重新生成已有大型资产。
 
-### M6：稳健性与去重
+M4.6 在 M2-E 正式发布后补齐单因子和简单组合的可执行证据：涨跌停、停牌、退市收益、T+1、费用、滑点、换手、冲击和容量。该执行层必须接收通用 prediction/score 输入，使未来 LightGBM 分数与单因子分数共享完全相同的订单和成交语义。
 
-- 年度、规模、行业、流动性、波动和事后 Regime 矩阵；
-- 因子值/IC/收益相关、层次聚类、VIF；
-- 条件 IC、正交 IC 和 Core Pool 边际增量；
-- Factor Graveyard 和研究饱和预警。
+M4.7 首版已完成：Factor Evidence Card 的只读展示快照、内容寻址静态报告和 `frontEnd/` React + TypeScript 应用已落地。首页支持全库筛选与分页，详情抽屉展示证据血缘，多因子页支持最多 6 条路径并排比较和导出未注册 FeatureSet 草案，Cluster 页展示去重与代表关系；M4.6/M6 指标明确显示 `NOT_AVAILABLE`。React 应用通过同步脚本读取流水线最新快照，不直连或回写 DuckDB。当前报告汇总 13 个因子、39 条因子×变体路径、25 条 canonical 路径和 10 个信息簇，报告 ID 为 `sha256:e86eab258a0e905f0e5e4296fe8ba943ef4dc8790a4898a4d1e514cb0ab9b17f`，静态独立审计为 `PASS_WITH_FINDINGS`。展示层不重新计算统计、不自动晋级、也不因单因子结果永久淘汰模型特征；当前 2020～2025 样本仍是已暴露研究样本。详细设计见 `docs/factor_evidence_explorer_ui.md`，验收见 `docs/audits/m4_7_factor_explorer_verification.md`。
 
-### M7：扩展因子库
+### M5：规模化 Feature Factory 与 Evidence Explorer
 
-- GTJA191；
-- WorldQuant Alpha101；
-- 经典基本面和技术因子；
-- Alpha360 作为模型特征集单独管理；
-- 合法可获得的外部公开因子。
+- 以 Alpha158 为第一批，逐公式映射、版本、来源、单元测试、随机人工样本和 Qlib 对照；
+- 后续 GTJA191、WorldQuant Alpha101、经典基本面/技术因子与合法公开因子复用同一批量发布契约；
+- 不允许整库一次性无验证导入，输出公式差异和无法等价复现清单；
+- 每个不可变 factor release 自动生成/刷新 Factor Evidence Card，不靠逐因子手工报告；
+- 提供按 Universe、horizon、variant、fold、regime、行业、规模、流动性和证据状态筛选的只读索引；
+- 支持多因子并排比较、簇/相关查询和导出 FeatureSetSpec，但不得把交互式选择包装成未见 OOS。
 
-### M8：Core Pool 与简单组合
+### M6：Model Research Lab
 
-- Contextual Core Pool；
-- Equal/IC/ICIR/Ridge/LASSO/ElasticNet；
-- 简单基线与复杂组合的 OOS 增量检验；
-- 动态选择只作为待证伪候选。
+- 建立线性/等权基线后接入 LightGBM；复杂模型必须证明相对简单基线的增量价值；
+- ModelSpec 冻结 FeatureSet、标签、Universe、目标、损失函数、参数搜索空间、预算、随机种子和执行假设；
+- Nested Walk-Forward：预处理拟合、缺失处理、去重、特征筛选、方向学习和调参全部限制在 Train/Validation 内；Test 只评价冻结方案；
+- 保存每个 fold 的实际入模特征、选择频率、gain/split importance、permutation importance、SHAP 分布及其不稳定性；
+- 进行单特征、簇级和机制组消融，报告对 RankIC、损失、组合收益、最差 fold 和换手/成本的增量；
+- 发布不可变 Model Evidence Asset。SHAP/importance 只用于解释和提出假设，不能单独证明 Alpha、因果关系或晋级资格。
 
-### M9：Portfolio、Execution 与 Walk-Forward
+### M7：模型级可执行证据与组合 Gate
 
-- Nested Walk-Forward、purge 和 embargo；
-- Long-only 与研究型 Long-short；
-- T+1、订单生命周期、不可成交、费用、滑点和容量；
-- Fold 稳定性、最差 Fold 和相关 Fold 处理。
+- 将 M6 冻结的模型预测映射为目标权重、订单、eligible fills、持仓和 PnL；
+- 与 M4.6 共用 T+1、涨跌停、停牌、退市、费用、滑点、冲击和容量逻辑；
+- 比较 gross/net、不同资金规模、换手约束、最差 fold、Regime 和成交失败原因；
+- 模型整体通过严格 OOS 与执行门禁后，才允许进入模型候选池；组成特征不因此自动成为独立 Alpha；
+- 单因子报告与模型贡献报告交叉链接，保留“单独弱但组合有用”和“单独强但组合冗余”两类证据。
 
-### M10：归因与滚动锁箱
+### M8：Feature 扩展与模型族对照
+
+- 扩展 GTJA191、WorldQuant Alpha101、经典基本面/技术因子和 Alpha360 模型特征集；
+- 每批新增特征必须与冻结的 M6/M7 基线做增量而非只报告新模型绝对表现；
+- 比较 Ridge/LASSO/ElasticNet、LightGBM 及必要的后续模型族；
+- 动态选择、交互特征和 Regime 专家模型只作为待证伪候选；
+- 建立研究饱和预警：新增特征数量增长但模型级 OOS 增量长期接近零时，降低同类特征挖掘优先级。
+
+### M9：Contextual Pools 与滚动锁箱
+
+- 分开管理 Standalone Factor Pool、Model Feature Pool 与 Deployable Model Pool；
+- 滚动 Holdout vintage、暴露账本、释放周期和研究预算；
+- 已暴露 Test 不得重新命名为 Holdout；新组合或新调参轮次继承相关暴露历史；
+- 状态始终绑定 factor/model、Universe、label、variant、execution 和 dataset vintage 上下文。
+
+### M10：归因、监控与衰减
 
 - 风格、行业、市场和特异收益归因；
-- 滚动 Holdout vintage；
-- 暴露账本；
-- 失败后禁止把已暴露区间重新命名为 Holdout。
+- 因子暴露、模型预测、特征贡献、交易成本和成交失败归因；
+- 训练分布、缺失模式、特征重要性、预测和 PnL 漂移；
+- 衰减、暂停、重训、回滚和重新验证事件；
+- Factor/Model Evidence Card 按新资产追加历史，不覆盖旧结论。
 
 ### M11：Research Agent
 
@@ -250,6 +266,8 @@ M4.4 已完成 2020-01-02～2025-12-31 长窗口、扩展训练窗的 Walk-Forwa
 - 与历史回放共享 Factor、Portfolio 和 Order 语义；
 - 每日数据快照、信号、订单、未成交原因和持仓审计；
 - 实盘 API 仍不在本阶段范围内。
+
+以上路线中的“池”和“状态”都是带上下文、可追溯的路由结果，不是删除操作。Factor Graveyard 仅保存明确原因和证据：完整性失败会阻止使用；单因子弱、方向证伪、线性冗余和特定模型无贡献只形成范围受限的状态，并允许在新数据、新 Universe、新 horizon 或新模型族下提出有预算的新复验。
 
 ## 8. 开发与独立审计流程
 

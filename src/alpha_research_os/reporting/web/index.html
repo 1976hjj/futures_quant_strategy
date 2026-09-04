@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Factor Evidence Explorer</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <div class="eyebrow">ALPHA RESEARCH OS</div>
+      <h1 id="report-title">Factor Evidence Explorer</h1>
+    </div>
+    <div class="context" id="context"></div>
+  </header>
+
+  <nav class="tabs" aria-label="Explorer pages">
+    <button class="tab active" data-view="overview">因子总览</button>
+    <button class="tab" data-view="compare">因子对比 <span id="selected-count">0</span></button>
+    <button class="tab" data-view="clusters">因子簇</button>
+    <button class="tab" data-view="about">证据说明</button>
+  </nav>
+
+  <main>
+    <section id="overview-view" class="view active">
+      <div class="notice warning" id="sample-notice"></div>
+      <div class="metric-grid" id="summary-cards"></div>
+      <div class="panel controls">
+        <label class="search"><span>搜索因子</span><input id="search" type="search" placeholder="ID、名称、family、来源"></label>
+        <label><span>Variant</span><select id="variant-filter"><option value="">全部</option></select></label>
+        <label><span>Family</span><select id="family-filter"><option value="">全部</option></select></label>
+        <label><span>Cluster</span><select id="cluster-filter"><option value="">全部</option></select></label>
+        <label><span>Route</span><select id="route-filter"><option value="">全部</option></select></label>
+        <label><span>排序</span><select id="sort"><option value="factor">因子 ID</option><option value="coverage">覆盖率</option><option value="rankic">|Test RankIC|</option><option value="incremental">|正交 RankIC|</option></select></label>
+      </div>
+      <div class="table-meta"><span id="visible-count"></span><span>单因子结果用于画像与组合参考，不是永久淘汰结论。</span></div>
+      <div class="table-wrap panel">
+        <table>
+          <thead><tr><th>选择</th><th>因子</th><th>Variant</th><th>Coverage</th><th>Walk-Forward</th><th>Cluster</th><th>正交 RankIC</th><th>执行</th><th>证据路由</th></tr></thead>
+          <tbody id="factor-table"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="compare-view" class="view">
+      <div class="section-head"><div><div class="eyebrow">FEATURESET WORKBENCH</div><h2>因子对比</h2><p>最多选择 6 条路径。导出只是草案，不会训练模型或修改生命周期。</p></div><button id="export-features" class="primary">导出 FeatureSet 草案</button></div>
+      <div id="compare-empty" class="empty panel">请先在因子总览中选择 2～6 条路径。</div>
+      <div id="compare-content"></div>
+    </section>
+
+    <section id="clusters-view" class="view">
+      <div class="section-head"><div><div class="eyebrow">UNSUPERVISED STRUCTURE</div><h2>因子簇</h2><p>代表项用于导航和默认计算路径，不代表晋级。</p></div></div>
+      <div class="cluster-grid" id="cluster-grid"></div>
+    </section>
+
+    <section id="about-view" class="view">
+      <div class="section-head"><div><div class="eyebrow">EVIDENCE BOUNDARY</div><h2>如何阅读</h2></div></div>
+      <div class="about-grid">
+        <article class="panel"><h3>不是排行榜</h3><p>没有混合量纲的总分。负 RankIC 不是错误，方向证伪也不等于模型特征无用。</p></article>
+        <article class="panel"><h3>样本已经暴露</h3><p>当前 2020～2025 结果用于诊断和提出新假设，不能重新包装为未见 OOS。</p></article>
+        <article class="panel"><h3>缺失不是零</h3><p><code>NOT_AVAILABLE</code> 表示阶段尚未发布；它与观测值 0 和数据 NULL 明确区分。</p></article>
+        <article class="panel"><h3>展示不创造证据</h3><p>正式事实来自不可变 Manifest、Parquet 和 DuckDB 视图。页面可以删除后重建。</p></article>
+      </div>
+      <div class="panel limitations"><h3>当前限制</h3><ul id="limitations"></ul></div>
+      <div class="panel lineage"><h3>报告血缘</h3><dl id="report-lineage"></dl></div>
+    </section>
+  </main>
+
+  <aside id="detail-drawer" class="drawer" aria-hidden="true">
+    <button id="close-detail" class="drawer-close" aria-label="关闭">×</button>
+    <div id="detail-content"></div>
+  </aside>
+  <div id="backdrop" class="backdrop"></div>
+  <div id="toast" class="toast" role="status"></div>
+
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

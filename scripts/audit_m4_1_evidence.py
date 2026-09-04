@@ -23,7 +23,12 @@ def _close(left: float | None, right: float | None, tolerance: float = 1e-12) ->
     return math.isclose(left, right, rel_tol=tolerance, abs_tol=tolerance)
 
 
-def audit(database: Path, evidence_store: Path, evidence_id: str) -> dict[str, object]:
+def audit(
+    database: Path,
+    evidence_store: Path,
+    evidence_id: str,
+    factor_store: Path = Path("data/factor_store"),
+) -> dict[str, object]:
     failures: list[str] = []
     bundle_dir = evidence_store / "bundles" / evidence_id.removeprefix("sha256:")
     evidence_manifest = EvidenceBundleManifest.model_validate_json((bundle_dir / "manifest.json").read_bytes())
@@ -44,12 +49,14 @@ def audit(database: Path, evidence_store: Path, evidence_id: str) -> dict[str, o
     factor_release_id = evidence_manifest.request.factor_release_id
     with duckdb.connect(str(database), read_only=True) as connection:
         factor_path_value = connection.execute(
-            "SELECT parquet_path FROM metadata.factor_release_manifest WHERE release_id=?",
-            [factor_release_id],
-        ).fetchone()
-        if factor_path_value is None:
-            raise ValueError("source factor release is not registered")
-        factor_path = Path("data/factor_store") / factor_path_value[0]
+            """SELECT parquet_path FROM metadata.factor_release_manifest WHERE release_id=?
+            UNION ALL
+            SELECT parquet_path FROM metadata.processed_factor_release_manifest WHERE release_id=?""",
+            [factor_release_id, factor_release_id],
+        ).fetchall()
+        if len(factor_path_value) != 1:
+            raise ValueError("source factor release must be registered exactly once")
+        factor_path = factor_store / factor_path_value[0][0]
         registered_label = connection.execute(
             "SELECT manifest_hash, parquet_hash FROM metadata.label_release_manifest WHERE release_id=?",
             [label_id],
@@ -142,8 +149,17 @@ def audit(database: Path, evidence_store: Path, evidence_id: str) -> dict[str, o
         if daily_invalid:
             failures.append("daily evidence violates count, coverage, finite-value, or correlation bounds")
 
-        crosscheck_factor = "price-momentum-20"
-        crosscheck_session = "2024-02-01"
+        crosscheck = connection.execute(
+            f"""SELECT factor_id,session
+            FROM read_parquet('{_sql_path(daily_path)}')
+            WHERE rank_ic IS NOT NULL
+            ORDER BY session DESC,factor_id
+            LIMIT 1"""
+        ).fetchone()
+        if crosscheck is None:
+            raise ValueError("evidence contains no non-null daily RankIC for an independent cross-check")
+        crosscheck_factor, crosscheck_session_value = crosscheck
+        crosscheck_session = crosscheck_session_value.isoformat()
         factor_rows = [
             RawFactorValue(
                 session=row[0],
@@ -241,13 +257,14 @@ def audit(database: Path, evidence_store: Path, evidence_id: str) -> dict[str, o
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", type=Path, default=Path("data/warehouse/alpha_research.duckdb"))
+    parser.add_argument("--factor-store", type=Path, default=Path("data/factor_store"))
     parser.add_argument("--evidence-store", type=Path, default=Path("data/evidence_store"))
     parser.add_argument(
         "--evidence-id", default="sha256:4c2bc48115894c0618149004c84bc1c820b1f1ec7c799b1f07160c370ef6faf3"
     )
     parser.add_argument("--output", type=Path, default=Path("reports/m4_1_evidence_audit.json"))
     args = parser.parse_args()
-    report = audit(args.database, args.evidence_store, args.evidence_id)
+    report = audit(args.database, args.evidence_store, args.evidence_id, args.factor_store)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2))

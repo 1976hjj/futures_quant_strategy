@@ -149,15 +149,15 @@ def audit(database: Path, evidence_store: Path, robustness_id: str) -> dict[str,
 
         target = connection.execute(
             f"""SELECT * FROM read_parquet('{_sql_path(hypothesis_path)}')
-            WHERE variant='RAW' AND factor_id='book-to-price'"""
+            ORDER BY variant,factor_id,factor_version LIMIT 1"""
         ).fetchone()
+        if target is None:
+            raise ValueError("robustness release contains no hypothesis for an independent cross-check")
         target_columns = [item[0] for item in connection.description]
         target_map = dict(zip(target_columns, target, strict=True))
         evidence_id = target_map["evidence_id"]
         input_manifest = EvidenceBundleManifest.model_validate_json(
-            (
-                evidence_store / "bundles" / evidence_id.removeprefix("sha256:") / "manifest.json"
-            ).read_bytes()
+            (evidence_store / "bundles" / evidence_id.removeprefix("sha256:") / "manifest.json").read_bytes()
         )
         daily_path = evidence_store / next(
             item.relative_path for item in input_manifest.files if item.name == "daily_metrics"
@@ -166,7 +166,8 @@ def audit(database: Path, evidence_store: Path, robustness_id: str) -> dict[str,
             row[0]
             for row in connection.execute(
                 f"""SELECT rank_ic FROM read_parquet('{_sql_path(daily_path)}')
-                WHERE factor_id='book-to-price' AND rank_ic IS NOT NULL ORDER BY session"""
+                WHERE factor_id=? AND rank_ic IS NOT NULL ORDER BY session""",
+                [target_map["factor_id"]],
             ).fetchall()
         ]
         hac = _independent_hac(values, manifest.request.inference.hac_max_lag)
@@ -194,7 +195,7 @@ def audit(database: Path, evidence_store: Path, robustness_id: str) -> dict[str,
             failures.append("independent moving-block bootstrap differs from stored result")
 
     limitations = " ".join(manifest.limitations).lower()
-    for phrase in ("58", "price-limit", "correlated", "standard-normal"):
+    for phrase in ("price-limit", "correlated", "standard-normal"):
         if phrase not in limitations:
             failures.append(f"required statistical limitation is missing: {phrase}")
     return {
@@ -204,8 +205,8 @@ def audit(database: Path, evidence_store: Path, robustness_id: str) -> dict[str,
         "stability_segment_rows": segment_count,
         "bootstrap_fdr_rejection_count": dimensions[3],
         "hac_fdr_rejection_count": dimensions[4],
-        "crosscheck_variant": "RAW",
-        "crosscheck_factor": "book-to-price",
+        "crosscheck_variant": target_map["variant"],
+        "crosscheck_factor": target_map["factor_id"],
         "failures": failures,
         "status": "PASS" if not failures else "FAIL",
     }

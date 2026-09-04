@@ -83,10 +83,7 @@ def audit(
         factor_manifest_payload = json.loads(factor_manifest_path.read_bytes())
         if content_hash(factor_manifest_payload) != reference.manifest_hash:
             failures.append(f"factor manifest hash mismatch: {reference.variant}")
-        if (
-            _sha256_file(factor_store / factor_manifest_payload["parquet_relative_path"])
-            != reference.parquet_hash
-        ):
+        if _sha256_file(factor_store / factor_manifest_payload["parquet_relative_path"]) != reference.parquet_hash:
             failures.append(f"factor Parquet hash mismatch: {reference.variant}")
     label_directory = evidence_store / "labels" / manifest.request.label_release_id.removeprefix("sha256:")
     label_manifest = LabelReleaseManifest.model_validate_json((label_directory / "manifest.json").read_bytes())
@@ -133,7 +130,9 @@ def audit(
             FROM metadata.holdout_exposure_ledger WHERE walk_forward_id=? ORDER BY fold_id""",
             [walk_forward_id],
         ).fetchall()
-        if len(exposure) != 3 or any(row[2] != "RESERVED_BEFORE_STATISTICAL_READ" for row in exposure):
+        if len(exposure) != len(manifest.request.evaluation.folds) or any(
+            row[2] != "RESERVED_BEFORE_STATISTICAL_READ" for row in exposure
+        ):
             failures.append("holdout exposure was not reserved before statistical read")
         if any(row[3] >= manifest.created_at for row in exposure):
             failures.append("holdout exposure timestamp is not earlier than release creation")
@@ -145,25 +144,26 @@ def audit(
             / ("raw_factor_values.parquet" if reference.variant == "RAW" else "processed_factor_values.parquet")
             for reference in manifest.request.factor_inputs
         }
-        sample_session = connection.execute(
-            f"""SELECT min(session) FROM read_parquet('{_sql_path(daily_path)}')
-            WHERE variant='RAW' AND factor_id='short-reversal-5' AND session>=DATE '2025-06-01'"""
-        ).fetchone()[0]
+        sample_variant, sample_factor_id, sample_factor_version, sample_session = connection.execute(
+            f"""SELECT variant,factor_id,factor_version,max(session) AS sample_session
+            FROM read_parquet('{_sql_path(daily_path)}') WHERE rank_ic IS NOT NULL
+            GROUP BY 1,2,3 ORDER BY sample_session DESC,variant,factor_id,factor_version LIMIT 1"""
+        ).fetchone()
         sample_pairs = connection.execute(
-            f"""SELECT f.value,l.value FROM read_parquet('{_sql_path(factor_paths['RAW'])}') f
+            f"""SELECT f.value,l.value FROM read_parquet('{_sql_path(factor_paths[sample_variant])}') f
             JOIN read_parquet('{_sql_path(label_path)}') l
               ON l.signal_session=f.session AND l.instrument_id=f.instrument_id
-            WHERE f.session=? AND f.factor_id='short-reversal-5'
+            WHERE f.session=? AND f.factor_id=? AND f.factor_version=?
               AND f.value IS NOT NULL AND l.is_valid AND l.value IS NOT NULL ORDER BY f.instrument_id""",
-            [sample_session],
+            [sample_session, sample_factor_id, sample_factor_version],
         ).fetchall()
         independent_rank_ic = _correlation(
             _ranks([row[0] for row in sample_pairs]), _ranks([row[1] for row in sample_pairs])
         )
         stored_rank_ic = connection.execute(
             f"""SELECT rank_ic FROM read_parquet('{_sql_path(daily_path)}')
-            WHERE variant='RAW' AND factor_id='short-reversal-5' AND session=?""",
-            [sample_session],
+            WHERE variant=? AND factor_id=? AND factor_version=? AND session=?""",
+            [sample_variant, sample_factor_id, sample_factor_version, sample_session],
         ).fetchone()[0]
         if not _close(independent_rank_ic, stored_rank_ic):
             failures.append("independent cross-sectional RankIC differs from daily asset")
@@ -177,11 +177,8 @@ def audit(
         expected_hac_q = _independent_bh([item["hac_p_value_two_sided"] for item in fold_dicts])
         expected_bootstrap_q = _independent_bh([item["bootstrap_p_value_two_sided"] for item in fold_dicts])
         if any(
-            not _close(item["hac_bh_q_value"], hac_q)
-            or not _close(item["bootstrap_bh_q_value"], bootstrap_q)
-            for item, hac_q, bootstrap_q in zip(
-                fold_dicts, expected_hac_q, expected_bootstrap_q, strict=True
-            )
+            not _close(item["hac_bh_q_value"], hac_q) or not _close(item["bootstrap_bh_q_value"], bootstrap_q)
+            for item, hac_q, bootstrap_q in zip(fold_dicts, expected_hac_q, expected_bootstrap_q, strict=True)
         ):
             failures.append("independent BH-FDR differs from stored fold q-values")
 
@@ -214,17 +211,11 @@ def audit(
                 failures.append(f"test mean differs from frozen date slice: {item['fold_id']} {item['factor_id']}")
                 break
 
-        target = next(
-            item
-            for item in fold_dicts
-            if item["fold_id"] == "WF-2025"
-            and item["variant"] == "RAW"
-            and item["factor_id"] == "volume-shock-20"
-        )
-        fold = fold_specs["WF-2025"]
+        target = fold_dicts[-1]
+        fold = fold_specs[target["fold_id"]]
         test = [
             target["direction_multiplier"] * value
-            for session, value in daily_grouped[("RAW", "volume-shock-20", target["factor_version"])]
+            for session, value in daily_grouped[(target["variant"], target["factor_id"], target["factor_version"])]
             if fold.test.start <= session <= fold.test.end
         ]
         hac = _independent_hac(test, manifest.request.evaluation.inference.hac_max_lag)
@@ -235,7 +226,7 @@ def audit(
             target["hac_p_value_two_sided"],
         )
         if any(not _close(left, right) for left, right in zip(hac, stored_hac, strict=True)):
-            failures.append("independent 2025 HAC calculation differs")
+            failures.append("independent target-fold HAC calculation differs")
         bootstrap = _independent_bootstrap(
             test,
             manifest.request.evaluation.inference.bootstrap_block_length,
@@ -249,7 +240,7 @@ def audit(
             target["bootstrap_confidence_upper"],
         )
         if any(not _close(left, right) for left, right in zip(bootstrap, stored_bootstrap, strict=True)):
-            failures.append("independent 2025 moving-block bootstrap differs")
+            failures.append("independent target-fold moving-block bootstrap differs")
 
         regime_count_errors = connection.execute(
             f"""WITH counts AS (
@@ -276,14 +267,12 @@ def audit(
                 item["bootstrap_fdr_reject"] and item["test_mean_rank_ic_directed"] < 0 for item in current
             ),
         }
+    contradicted = sum(item["hac_fdr_reject"] and item["test_mean_rank_ic_directed"] < 0 for item in fold_dicts)
     findings = (
-        "Three price-momentum variants significantly contradict their declared positive direction in every test fold.",
-        (
-            "RAW and winsorized-zscore ranks are near-duplicate tests; "
-            "FDR rejection counts are not independent discoveries."
-        ),
-        "The 2025 window is now exposed and cannot be reused as an unseen holdout.",
-        "No result is promotion-eligible before limit-aware labels, costs, delisting returns, and redundancy tests.",
+        f"{contradicted} configured fold-factor-variant hypotheses significantly contradict their frozen direction.",
+        "FDR rejection counts may contain correlated variants and are not independent Alpha discoveries.",
+        "Any fold marked as a first research read is exposed after this run and cannot be reused as unseen.",
+        "No result is promotion-eligible before configured execution, cost, delisting, and redundancy gates.",
     )
     return {
         "audited_at": datetime.now().astimezone().isoformat(),
@@ -292,6 +281,7 @@ def audit(
         "fold_hypotheses": manifest.fold_hypothesis_count,
         "regime_rows": manifest.regime_row_count,
         "rank_ic_crosscheck_session": sample_session.isoformat(),
+        "rank_ic_crosscheck_entity": f"{sample_variant}|{sample_factor_id}|{sample_factor_version}",
         "support_and_contradiction_by_fold": support_by_fold,
         "findings": findings,
         "failures": failures,

@@ -84,6 +84,32 @@ RAW、Winsorized、Standardized、Industry Neutralized、Industry+Size Neutraliz
 
 运行后不得原地修改 ExperimentSpec。修改产生新的 experiment id。
 
+## 5.1 FeatureSetSpec
+
+用于模型研究的特征集合必须作为不可变对象发布，至少声明：
+
+- factor release 与每个 `factor_id/factor_version/variant`；
+- inclusion/exclusion reason、canonical/cluster 关系和来源 Evidence ID；
+- 缺失处理、预处理、去重与筛选规则；
+- 规则是在 outer Train、inner Train/Validation 还是研究者已暴露样本上形成；
+- 创建者、创建时间、父 FeatureSet 和研究预算事件；
+- 当时已查看的 Test/Holdout vintage。
+
+Evidence Explorer 导出的手工组合只是下一轮实验输入。用来选择组合的数据已经暴露，不得继续充当该组合的未见 Test。
+
+## 5.2 ModelSpec 与 ModelRun
+
+ModelSpec 除 ExperimentSpec 外还必须冻结模型实现/依赖哈希、目标函数、参数空间、搜索算法与预算、随机种子、FeatureSet、预测到组合的映射和模型级基线。ModelRun 必须逐 fold 保存：
+
+- 实际拟合的预处理和 FeatureSet；
+- Train/Validation 选择轨迹与最终参数；
+- Test 预测及其首次读取事件；
+- gain/split、permutation、SHAP 和消融证据；
+- 相对简单基线的预测及 execution-aware 增量；
+- 模型文件、环境、日志、资源消耗和失败原因。
+
+特征重要性和 SHAP 是模型依赖的解释证据，不是因子的全局 Alpha 资格。
+
 ## 6. ExperimentRun
 
 运行记录至少包含：
@@ -128,19 +154,21 @@ RAW、Winsorized、Standardized、Industry Neutralized、Industry+Size Neutraliz
 
 重叠 Test 窗口产生相关 Fold，汇总统计必须明确处理，不能把它们当独立样本。
 
-## 9. 因子晋级
+## 9. 证据路由与晋级
 
-晋级使用硬门禁和 Scorecard 两层：
+系统分别路由独立因子资格、模型特征资格和模型/策略资格。单因子证据卡不执行永久淘汰；晋级使用硬门禁和 Scorecard 两层。
 
 ### 硬门禁
 
-- 无数据/实现 blocker；
+- 无数据/实现 blocker；完整性 blocker 同时禁止 standalone、模型训练和交易；
 - 无未来数据和非法 Test 使用；
 - 覆盖率和样本量达标；
 - 已完成预注册的 multiple-testing correction；
 - 已完成 OOS；
 - Tradable 必须完成成本测试；
 - Deployable 必须完成流动性和容量测试。
+
+单因子不显著、方向证伪、线性冗余或在某个模型中 importance 较低，不属于跨模型硬门禁。它们分别产生 `DIAGNOSTIC_ONLY`、`DIRECTION_CONTRADICTED`、`CANONICALIZED_REDUNDANT` 或 `RETIRED_IN_CONTEXT` 等上下文标签。
 
 ### Scorecard
 
@@ -170,5 +198,10 @@ Scorecard 权重配置化，但不能越过硬门禁。
 - `RETIRED`
 - `INVALIDATED_BY_DATA_REVISION`
 - `RETEST_REQUESTED`
+- `MARKED_MODEL_FEATURE_ELIGIBLE`
+- `QUARANTINED_INTEGRITY_FAILURE`
+- `FEATURESET_CREATED`
+- `MODEL_EVALUATION_COMPLETED`
+- `RETIRED_IN_CONTEXT`
 
 当前状态由事件投影生成，事件本身不可删除。

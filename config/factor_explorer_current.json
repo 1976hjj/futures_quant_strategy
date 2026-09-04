@@ -1,0 +1,13 @@
+{
+  "schema_version": "1",
+  "report_name": "M4-CURRENT-FACTOR-EXPLORER-v1",
+  "title": "Alpha Research OS · Factor Evidence Explorer",
+  "database": "data/warehouse/alpha_research.duckdb",
+  "evidence_store": "data/evidence_store",
+  "output_root": "reports/factor_explorer",
+  "walk_forward_id": "sha256:a32e6aa8bdfa962280b7cac5fdedfe0be4dd98b620a0295eec65b2956999a95e",
+  "redundancy_id": "sha256:442cf98e81eb98eea2b41714ed1d9d5a6fb449b905e6805766f7f8f3c93a0626",
+  "robustness_id": "sha256:a8368caf70682a1918fb3f2c7380e510b2b62a169db1e142a603d0d601337eaa",
+  "basic_evidence_ids": [],
+  "maximum_compare_entities": 6
+}

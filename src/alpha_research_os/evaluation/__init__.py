@@ -8,6 +8,9 @@ from .assets import (
     FactorVariantReleaseRef,
     LabelAssetRequest,
     LabelReleaseManifest,
+    RedundancyEvaluationSpec,
+    RedundancyEvidenceManifest,
+    RedundancyEvidenceRequest,
     RobustnessEvidenceManifest,
     RobustnessEvidenceRequest,
     StatisticalInferenceSpec,
@@ -26,6 +29,13 @@ from .labels import (
     default_forward_5d_label_spec,
 )
 from .metrics import BasicFactorEvidence, DailyFactorEvidence, QuantileReturn, evaluate_basic_factor
+from .redundancy import (
+    ClusterMerge,
+    PartialRankMetrics,
+    average_linkage_clusters,
+    hierarchical_average_linkage,
+    partial_rank_metrics,
+)
 from .robustness import (
     HACMeanTest,
     MovingBlockBootstrap,
@@ -54,9 +64,13 @@ __all__ = [
     "LabelReleaseManifest",
     "MarketLabelRow",
     "MovingBlockBootstrap",
+    "PartialRankMetrics",
     "QuantileReturn",
     "RobustnessEvidenceManifest",
     "RobustnessEvidenceRequest",
+    "RedundancyEvaluationSpec",
+    "RedundancyEvidenceManifest",
+    "RedundancyEvidenceRequest",
     "SignalKey",
     "StabilityDiagnostic",
     "StabilitySegment",
@@ -65,10 +79,14 @@ __all__ = [
     "WalkForwardEvidenceManifest",
     "WalkForwardEvidenceRequest",
     "WalkForwardFoldSpec",
+    "ClusterMerge",
+    "average_linkage_clusters",
     "benjamini_hochberg",
     "default_forward_5d_label_spec",
     "evaluate_basic_factor",
     "moving_block_bootstrap_mean",
     "newey_west_mean_test",
+    "hierarchical_average_linkage",
+    "partial_rank_metrics",
     "stability_diagnostic",
 ]

@@ -146,6 +146,8 @@ prediction -> target portfolio -> orders -> eligible fills -> holdings -> PnL
 
 第一阶段是确定性 DAG；Agent 后置。
 
+当前 M4 确定性入口为 `scripts/run_m4_pipeline.py`。它读取机器校验、内容寻址的批次配置，按依赖顺序连接 Factor release、processed release、Evidence、Walk-Forward、冗余/增量证据和独立审计；阶段实现不得包含因子白名单。配置与各阶段 Manifest 分工明确：配置描述本次 DAG 和显式方向假设，Manifest 固定每个不可变输出及完整输入血缘，DuckDB 只注册可查询的结构化视图。
+
 允许的 Agent 操作：
 
 - 读取已授权研究证据；
@@ -191,7 +193,7 @@ Provider 只负责获取并描述来源，不直接提供“已经可信”的�
 
 ### PromotionService
 
-硬性门禁优先于总分。任何 `LOOKAHEAD`、`DATA_ERROR`、未做 OOS、无成本测试或无流动性测试，都不能被高 IC 抵消。
+PromotionService 分别管理独立因子、模型特征和可部署模型，不把三种资格混为一个状态。任何 `LOOKAHEAD`、`DATA_ERROR` 或 PIT 违规都会阻止该资产进入训练和交易；单因子不显著、方向证伪或线性增量不足只限制独立因子声明，不自动取消 `MODEL_FEATURE_ELIGIBLE`。模型或策略晋级仍要求严格 OOS、成本、流动性、容量和审计门禁，高分不能抵消硬门禁。
 
 ## 5. Contextual Factor Status
 
@@ -206,7 +208,9 @@ Provider 只负责获取并描述来源，不直接提供“已经可信”的�
  dataset_vintage)
 ```
 
-同一因子可以在一个上下文为 `CORE`，在另一个上下文为 `REJECTED`。全局摘要只是这些上下文状态的派生视图。
+同一因子可以在一个上下文为 `STANDALONE_ELIGIBLE`，在另一个上下文为 `DIAGNOSTIC_ONLY`，同时仍可在某个严格隔离的模型实验中是 `MODEL_FEATURE_ELIGIBLE`。全局摘要只是这些上下文状态的派生视图，不能由单因子检验生成永久全局淘汰。
+
+Factor Evidence Card 和 Model Evidence Card 是 Evidence Plane 的只读投影。它们汇总已有证据、支持比较和提出组合假设，但不得反向改写 Manifest、隐去失败结果或把研究者已经查看的数据重新标记为未见 OOS。详细边界见 `docs/feature_and_model_evidence_plan.md`。
 
 ## 6. 时间与成交状态机
 
@@ -234,7 +238,7 @@ Registry 保存小型结构化元数据；大对象保存在 artifact store。
 - Market warehouse：DuckDB 目录与研究视图 + 按年月分区的 Parquet 数据；
 - Artifact：本地 Parquet/JSON/HTML，按内容哈希和 manifest 管理；
 - Raw snapshot：只追加；
-- 报告：从 Evidence Bundle 可重复生成。
+- 报告：Factor/Model Evidence Card 与 Explorer 从 Evidence Bundle 可重复生成，不保存独立于证据层的新结论。
 
 当前市场仓库入口为 `data/warehouse/alpha_research.duckdb`。`raw` schema 保留供应商原始字段和单位，`research` schema 提供单位标准化、质量标志和可交易行情视图，`metadata` schema 保存归档血缘、字段字典和质量摘要。具体连接与查询方式见 `docs/warehouse.md`。
 
@@ -248,7 +252,7 @@ Registry 保存小型结构化元数据；大对象保存在 artifact store。
 - `REJECTED_HYPOTHESIS`：实验有效执行，但未通过预注册门槛；
 - `CONTEXT_LIMITED`：只在特定规模、时期或 Regime 下成立。
 
-Graveyard 必须区分这三类，防止把代码 bug 当作经济结论，也防止修复 bug 后删除旧失败记录。
+Graveyard 必须区分这三类，防止把代码 bug 当作经济结论，也防止修复 bug 后删除旧失败记录。`REJECTED_HYPOTHESIS` 是具体假设和上下文的结论，不等于因子永久禁止进入其他模型族；只有未解除的完整性 blocker 才具有跨模型的禁止效力。
 
 ## 9. 外部框架集成
 

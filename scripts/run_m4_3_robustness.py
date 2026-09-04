@@ -148,9 +148,7 @@ def _calculate(
                     "hac_max_lag": hac.max_lag,
                     "hac_standard_error": hac.standard_error,
                     "hac_z_statistic": (
-                        hac.z_statistic
-                        if hac.z_statistic is not None and math.isfinite(hac.z_statistic)
-                        else None
+                        hac.z_statistic if hac.z_statistic is not None and math.isfinite(hac.z_statistic) else None
                     ),
                     "hac_p_value_two_sided": hac.p_value_two_sided,
                     "bootstrap_method": spec.bootstrap_method,
@@ -296,12 +294,18 @@ def _register(database: Path, evidence_store: Path, manifest: RobustnessEvidence
         connection.close()
 
 
-def publish(database: Path, evidence_store: Path, evidence_ids: tuple[str, ...]) -> dict[str, Any]:
+def publish(
+    database: Path,
+    evidence_store: Path,
+    evidence_ids: tuple[str, ...],
+    *,
+    family_id: str = FAMILY_ID,
+) -> dict[str, Any]:
     references, loaded = _load_inputs(evidence_store, evidence_ids)
     label_release_id = next(iter(manifest.request.label_release_id for manifest, _ in loaded.values()))
     request = RobustnessEvidenceRequest(
         engine_version=ENGINE_VERSION,
-        multiple_testing_family_id=FAMILY_ID,
+        multiple_testing_family_id=family_id,
         label_release_id=label_release_id,
         evidence_inputs=references,
         inference=StatisticalInferenceSpec(),
@@ -322,9 +326,7 @@ def publish(database: Path, evidence_store: Path, evidence_ids: tuple[str, ...])
         return {"cache_hit": True, "robustness_id": manifest.robustness_id, "manifest": str(manifest_path.resolve())}
     directory.mkdir(parents=True, exist_ok=True)
     hypotheses, segments, summary = _calculate(request, loaded)
-    temporary = {
-        name: path.with_name(f".{path.stem}.{uuid.uuid4().hex}.tmp.parquet") for name, path in targets.items()
-    }
+    temporary = {name: path.with_name(f".{path.stem}.{uuid.uuid4().hex}.tmp.parquet") for name, path in targets.items()}
     _write_parquet(temporary["hypothesis_statistics"], hypotheses)
     _write_parquet(temporary["stability_segments"], segments)
     _write_parquet(temporary["family_summary"], [summary])
@@ -351,7 +353,7 @@ def publish(database: Path, evidence_store: Path, evidence_ids: tuple[str, ...])
         quality_status="PASS",
         decision_status="DIAGNOSTIC_ONLY_NOT_OOS",
         limitations=(
-            "Only 58 Q1 2024 sessions are observed; stability segments are short-window diagnostics.",
+            "The input evidence window is inherited from the configured bundles; segments remain diagnostics.",
             "The provisional label is not price-limit, delisting-return, or transaction-cost aware.",
             "BH-FDR is applied to correlated factor variants and does not substitute for OOS validation.",
             "HAC uses an asymptotic standard-normal reference; block-bootstrap inference is also reported.",
@@ -377,9 +379,16 @@ def main() -> int:
     parser.add_argument("--database", type=Path, default=Path("data/warehouse/alpha_research.duckdb"))
     parser.add_argument("--evidence-store", type=Path, default=Path("data/evidence_store"))
     parser.add_argument("--evidence-id", action="append", dest="evidence_ids")
+    parser.add_argument("--family-id", default=FAMILY_ID)
     args = parser.parse_args()
     evidence_ids = tuple(args.evidence_ids) if args.evidence_ids else DEFAULT_EVIDENCE_IDS
-    print(json.dumps(publish(args.database, args.evidence_store, evidence_ids), ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            publish(args.database, args.evidence_store, evidence_ids, family_id=args.family_id),
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     return 0
 
 

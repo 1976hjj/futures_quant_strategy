@@ -257,6 +257,22 @@ M4.2 的 `SIZE_NEUTRALIZED` 是每日把去极值 Z-score 对 `log(total_mv)` �
 
 把候选因子对已有因子回归并使用残差，检查其独立信息。顺序会影响结果，不能把正交化后的改善自动解释为经济独立性。
 
+### Conditional / Orthogonal RankIC（条件 / 正交 RankIC）
+
+先在每日横截面把候选因子秩对冻结的控制因子集合做投影，再衡量残差与未来收益秩的关系。半偏相关只残差化候选因子；偏相关同时剔除标签对控制集合的线性关系。它回答“相对当前控制集合还剩多少秩信息”，不证明因果独立，也不等于可交易 Alpha。
+
+### Incremental R²（增量决定系数）
+
+把候选因子加入冻结控制集合后，横截面收益秩回归的 R² 增量。它始终非负，因此必须与有方向的正交 RankIC、稳健推断和样本暴露状态一起解释，不能单独用于晋级。
+
+### Factor Cluster 与 Mechanical Representative
+
+Factor Cluster 是按冻结相关距离和层次聚类规则形成的信息簇。Mechanical Representative 是由 medoid、覆盖率和固定平局规则选出的查询代表，只用于减少重复路径；它不是收益最优者，也不自动进入 Core Pool。
+
+### Exposed Research Sample
+
+已经被研究流程读取或参与选择的历史区间。它仍可用于诊断、证伪和生成后续假设，但不能重新包装成未见 Holdout、确认性 OOS 或独立重复证据。M4.5 的 2020～2025 全窗口属于此类。
+
 ### Coverage
 
 某日具有有效因子值且进入目标 Universe 的证券比例。覆盖率突然变化可能意味着数据故障或因子适用范围漂移。
@@ -527,11 +543,17 @@ Drawdown 是净值从历史峰值的回撤；最大回撤是样本期最大峰�
 
 ## 8. 因子生命周期与治理
 
-### REJECTED、WATCH、CORE、DECAYED、RETIRED
+### 证据路由与生命周期状态
 
 | 状态 | 含义 |
 |---|---|
-| REJECTED | 未通过硬门禁或证据不足 |
+| QUARANTINED_INTEGRITY_FAILURE | 存在未来数据、PIT、实现或数据完整性 blocker，禁止训练和交易 |
+| STANDALONE_ELIGIBLE | 可进入独立因子/简单组合候选，不等于 CORE |
+| MODEL_FEATURE_ELIGIBLE | 可进入严格隔离的模型研究，不表示单因子有效 |
+| DIAGNOSTIC_ONLY | 仅用于理解、证伪或提出新假设 |
+| CANONICALIZED_REDUNDANT | 默认折叠重复计算，原资产和历史证据仍保留 |
+| REQUIRES_NEW_OOS | 当前结论使用过暴露样本，需要新 vintage 才能确认 |
+| REJECTED / RETIRED_IN_CONTEXT | 在指定假设或上下文中未通过/停止使用，不是全局删除 |
 | WATCH | 值得继续观察但不可视为核心 |
 | CORE | 在指定上下文中通过规定证据门禁 |
 | DECAYED | 预测力、稳定性或可交易性显著衰减 |
@@ -553,7 +575,15 @@ Decay 是证据恶化；Disable 是暂时禁止运行或入组；Retire 是正�
 
 ### Factor Graveyard
 
-永久保存失败、重复、衰减和淘汰因子及其证据，防止未来换名字重新挖掘同一假设。
+永久保存失败、重复、衰减和淘汰假设及其上下文证据，防止未来换名字重新挖掘同一结果。Graveyard 是研究记忆而不是物理删除：单因子弱、方向证伪、线性冗余或某个模型下无贡献，不会自动禁止该特征进入其他严格隔离的模型实验；未解除的完整性 blocker 除外。
+
+### Factor Evidence Card / Model Evidence Card
+
+Evidence Card 是不可变证据的可重建、只读投影。Factor Card 展示单因子质量、预测、稳定性、相关、增量和可执行性；Model Card 展示 FeatureSet、fold、基线、重要性、消融、OOS 和成交证据。展示和筛选产生研究暴露，不能把看过的数据继续称为未见 OOS。
+
+### FeatureSetSpec
+
+模型输入特征集合的不可变规范，记录因子版本/变体、筛选和预处理规则、cluster/canonical 关系、来源证据以及选择时已经暴露的数据。不同 FeatureSet 是不同实验输入，不能只保存最终胜出集合。
 
 ### Contextual Status
 

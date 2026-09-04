@@ -9,6 +9,7 @@ description = "Auditable point-in-time A-share alpha research system"
 requires-python = ">=3.11"
 dependencies = [
   "duckdb>=1.5,<2",
+  "numpy>=2.0,<3",
   "pydantic>=2.10,<3",
   "pyarrow>=18,<24",
 ]

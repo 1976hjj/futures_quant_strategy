@@ -249,8 +249,7 @@ class WalkForwardEvidenceRequest(FrozenSpec):
         if keys != sorted(set(keys)):
             raise ValueError("factor inputs must be sorted and unique by variant and identity")
         if any(
-            fold.train.start < self.window.start or fold.test.end > self.window.end
-            for fold in self.evaluation.folds
+            fold.train.start < self.window.start or fold.test.end > self.window.end for fold in self.evaluation.folds
         ):
             raise ValueError("walk-forward folds must remain inside the published factor window")
         return self
@@ -280,4 +279,81 @@ class WalkForwardEvidenceManifest(FrozenSpec):
         names = [item.name for item in self.files]
         if names != sorted(set(names)):
             raise ValueError("walk-forward files must be sorted and unique")
+        return self
+
+
+class RedundancyEvaluationSpec(FrozenSpec):
+    """Frozen M4.5 rules for unsupervised deduplication and conditional evidence."""
+
+    schema_version: Literal["1"] = "1"
+    spec_id: Identifier = "m4-5-redundancy-and-incremental-value"
+    spec_version: Version = "1.0.0"
+    value_correlation_method: Literal["MONTH_END_DAILY_SPEARMAN"] = "MONTH_END_DAILY_SPEARMAN"
+    ic_correlation_method: Literal["FULL_WINDOW_PEARSON_DAILY_RANK_IC"] = "FULL_WINDOW_PEARSON_DAILY_RANK_IC"
+    duplicate_value_correlation_threshold: float = Field(default=0.995, ge=0, le=1)
+    duplicate_ic_correlation_threshold: float = Field(default=0.995, ge=0, le=1)
+    clustering_method: Literal["AVERAGE_LINKAGE_ABSOLUTE_CORRELATION"] = "AVERAGE_LINKAGE_ABSOLUTE_CORRELATION"
+    cluster_distance_threshold: float = Field(default=0.35, gt=0, lt=1)
+    representative_rule: Literal["UNSUPERVISED_MEDOID_COVERAGE_VARIANT_ID"] = "UNSUPERVISED_MEDOID_COVERAGE_VARIANT_ID"
+    conditional_method: Literal["DAILY_RANK_PARTIAL_AND_SEMIPARTIAL_CORRELATION"] = (
+        "DAILY_RANK_PARTIAL_AND_SEMIPARTIAL_CORRELATION"
+    )
+    minimum_pairs_per_session: int = Field(default=100, ge=20)
+    ridge_regularization: float = Field(default=1e-8, gt=0, le=1e-2)
+    inference: StatisticalInferenceSpec = Field(
+        default_factory=lambda: StatisticalInferenceSpec(
+            spec_id="m4-5-orthogonal-rank-ic-inference",
+            spec_version="1.0.0",
+        )
+    )
+
+
+class RedundancyEvidenceRequest(FrozenSpec):
+    schema_version: Literal["1"] = "1"
+    engine_version: Version
+    multiple_testing_family_id: Identifier
+    source_walk_forward_id: Digest
+    source_walk_forward_manifest_hash: Digest
+    factor_inputs: tuple[FactorVariantReleaseRef, ...] = Field(min_length=2)
+    label_release_id: Digest
+    label_manifest_hash: Digest
+    window: DateRange
+    sample_classification: Literal["EXPOSED_RESEARCH_SAMPLE_NOT_OOS"] = "EXPOSED_RESEARCH_SAMPLE_NOT_OOS"
+    exposure_ledger_snapshot_hash: Digest
+    exposure_ledger_row_count: int = Field(ge=1)
+    evaluation: RedundancyEvaluationSpec
+
+    @model_validator(mode="after")
+    def validate_inputs(self) -> RedundancyEvidenceRequest:
+        keys = [(item.variant, item.release_id) for item in self.factor_inputs]
+        if keys != sorted(set(keys)):
+            raise ValueError("redundancy factor inputs must be sorted and unique")
+        return self
+
+    @property
+    def redundancy_id(self) -> Digest:
+        return content_hash(self)
+
+
+class RedundancyEvidenceManifest(FrozenSpec):
+    schema_version: Literal["1"] = "1"
+    redundancy_id: Digest
+    request: RedundancyEvidenceRequest
+    created_at: datetime
+    files: tuple[EvidenceFile, ...] = Field(min_length=1)
+    entity_count: int = Field(ge=1)
+    canonical_entity_count: int = Field(ge=1)
+    cluster_count: int = Field(ge=1)
+    conditional_hypothesis_count: int = Field(ge=1)
+    quality_status: Literal["PASS"]
+    decision_status: Literal["NO_PROMOTION_REDUNDANCY_DIAGNOSTIC"]
+    limitations: tuple[str, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def identity_matches(self) -> RedundancyEvidenceManifest:
+        if self.redundancy_id != self.request.redundancy_id:
+            raise ValueError("redundancy_id must equal its immutable request identity")
+        names = [item.name for item in self.files]
+        if names != sorted(set(names)):
+            raise ValueError("redundancy files must be sorted and unique")
         return self

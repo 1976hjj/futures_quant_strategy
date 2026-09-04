@@ -1,0 +1,92 @@
+{
+  "schema_version": "1",
+  "batch_id": "M4-CURRENT-2020-2025-v1",
+  "paths": {
+    "database": "data/warehouse/alpha_research.duckdb",
+    "factor_store": "data/factor_store",
+    "evidence_store": "data/evidence_store",
+    "report": "reports/m4_pipeline_current.json"
+  },
+  "stages": [
+    "walk_forward",
+    "redundancy",
+    "audit_walk_forward",
+    "audit_redundancy",
+    "factor_explorer",
+    "audit_factor_explorer"
+  ],
+  "raw_factor_release_id": "sha256:3e3d4e69428ce879ee9b53ffc6c39bc8b17b8d49780d305ecff8c0e96ee94fe7",
+  "processed_factor_release_ids": [
+    "sha256:b18a177256ad433e20cf97d543a5e68d324c6c3c4d9859be8981a41ee8761009",
+    "sha256:0e3b87d5c2fbdae6b46569d633e2a370add03eae27c49d4bee8a31266fc6a91a"
+  ],
+  "processed_variants": [],
+  "walk_forward": {
+    "family_id": "M4-4-2023-2025-RANKIC-ALL-FACTORS-ALL-VARIANTS-v1",
+    "engine_version": "duckdb-python-walk-forward-1.0.0",
+    "window_start": "2020-01-02",
+    "window_end": "2025-12-31",
+    "folds": [
+      {
+        "fold_id": "WF-2023",
+        "train_start": "2020-01-02",
+        "train_end": "2021-12-24",
+        "validation_start": "2022-01-11",
+        "validation_end": "2022-12-23",
+        "test_start": "2023-01-10",
+        "test_end": "2023-12-29",
+        "exposure_status": "RETROSPECTIVE_DIAGNOSTIC"
+      },
+      {
+        "fold_id": "WF-2024",
+        "train_start": "2020-01-02",
+        "train_end": "2022-12-23",
+        "validation_start": "2023-01-10",
+        "validation_end": "2023-12-22",
+        "test_start": "2024-01-09",
+        "test_end": "2024-12-31",
+        "exposure_status": "RETROSPECTIVE_DIAGNOSTIC"
+      },
+      {
+        "fold_id": "WF-2025",
+        "train_start": "2020-01-02",
+        "train_end": "2023-12-22",
+        "validation_start": "2024-01-09",
+        "validation_end": "2024-12-24",
+        "test_start": "2025-01-09",
+        "test_end": "2025-12-31",
+        "exposure_status": "FROZEN_RESEARCH_UNSEEN"
+      }
+    ]
+  },
+  "redundancy": {
+    "family_id": "M4-5-ORTHOGONAL-RANKIC-EXPOSED-2020-2025-ALL-CANONICAL-v1",
+    "candidate_policy": "ALL_CANONICAL",
+    "bind_configuration_to_asset_identity": false,
+    "direction_overrides": {
+      "price-momentum-20": {
+        "multiplier": -1,
+        "direction_source": "POST_M4_4_REVERSED_MOMENTUM_DIAGNOSTIC",
+        "focus_hypothesis": "REVERSED_PRICE_MOMENTUM"
+      },
+      "volume-shock-20": {
+        "multiplier": -1,
+        "direction_source": "POST_M4_4_OBSERVED_NEGATIVE_DIAGNOSTIC",
+        "focus_hypothesis": "VOLUME_SHOCK"
+      },
+      "return-volatility-20": {
+        "multiplier": -1,
+        "direction_source": "DECLARED_NEGATIVE",
+        "focus_hypothesis": "RETURN_VOLATILITY"
+      }
+    }
+  },
+  "factor_explorer": {
+    "report_name": "M4-CURRENT-FACTOR-EXPLORER-v1",
+    "title": "Alpha Research OS · Factor Evidence Explorer",
+    "output_root": "reports/factor_explorer",
+    "robustness_id": "sha256:a8368caf70682a1918fb3f2c7380e510b2b62a169db1e142a603d0d601337eaa",
+    "basic_evidence_ids": [],
+    "maximum_compare_entities": 6
+  }
+}

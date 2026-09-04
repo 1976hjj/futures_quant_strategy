@@ -35,7 +35,7 @@ from alpha_research_os.factors import FactorReleaseManifest
 from alpha_research_os.kernel.canonical import canonical_json_bytes, content_hash
 from alpha_research_os.kernel.specs import DateRange
 
-ENGINE_VERSION = "duckdb-python-walk-forward-1.0.0"
+ENGINE_VERSION = "duckdb-python-walk-forward-1.1.0"
 FAMILY_ID = "M4-4-2023-2025-RANKIC-ALL-FACTORS-ALL-VARIANTS-v1"
 RAW_RELEASE_ID = "sha256:3e3d4e69428ce879ee9b53ffc6c39bc8b17b8d49780d305ecff8c0e96ee94fe7"
 PROCESSED_RELEASE_IDS = (
@@ -101,11 +101,11 @@ def _folds() -> tuple[WalkForwardFoldSpec, ...]:
 
 
 def _load_factor_inputs(
-    factor_store: Path,
+    factor_store: Path, release_ids: tuple[str, ...]
 ) -> tuple[tuple[FactorVariantReleaseRef, ...], dict[str, tuple[Any, Path]]]:
     loaded: dict[str, tuple[Any, Path]] = {}
     references: list[FactorVariantReleaseRef] = []
-    for release_id in (RAW_RELEASE_ID, *PROCESSED_RELEASE_IDS):
+    for release_id in release_ids:
         manifest, parquet = _factor_manifest(factor_store, release_id)
         references.append(
             FactorVariantReleaseRef(
@@ -116,28 +116,36 @@ def _load_factor_inputs(
             )
         )
         loaded[manifest.request.variant] = (manifest, parquet)
-    if len(loaded) != 3:
-        raise ValueError("M4.4 requires three unique factor variants")
+    if "RAW" not in loaded:
+        raise ValueError("walk-forward evaluation requires exactly one RAW factor release")
+    if len(loaded) != len(release_ids):
+        raise ValueError("factor releases must have unique variants")
     return tuple(sorted(references, key=lambda item: (item.variant, item.release_id))), loaded
 
 
 def _request(
-    references: tuple[FactorVariantReleaseRef, ...], label_manifest: LabelReleaseManifest
+    references: tuple[FactorVariantReleaseRef, ...],
+    label_manifest: LabelReleaseManifest,
+    *,
+    family_id: str,
+    folds: tuple[WalkForwardFoldSpec, ...],
+    window: DateRange,
+    engine_version: str,
 ) -> WalkForwardEvidenceRequest:
     evaluation = WalkForwardEvaluationSpec(
-        folds=_folds(),
+        folds=folds,
         inference=StatisticalInferenceSpec(
             spec_id="m4-4-fold-rank-ic-inference",
             spec_version="1.0.0",
         ),
     )
     return WalkForwardEvidenceRequest(
-        engine_version=ENGINE_VERSION,
-        multiple_testing_family_id=FAMILY_ID,
+        engine_version=engine_version,
+        multiple_testing_family_id=family_id,
         factor_inputs=references,
         label_release_id=label_manifest.release_id,
         label_manifest_hash=content_hash(label_manifest),
-        window=DateRange(start=date(2020, 1, 2), end=date(2025, 12, 31)),
+        window=window,
         evaluation=evaluation,
     )
 
@@ -273,11 +281,13 @@ def _market_regimes(database: Path, raw_path: Path) -> dict[date, tuple[float, f
     with duckdb.connect(str(database), read_only=True) as connection:
         _configure(connection, Path("data/evidence_store/duckdb_tmp"))
         rows = connection.execute(
-            f"""WITH daily AS (
+            f"""WITH universe_keys AS (
+              SELECT DISTINCT session,instrument_id FROM read_parquet('{_sql_path(raw_path)}')
+            ), daily AS (
               SELECT f.session,avg(CASE WHEN m.pre_close>0 THEN m.close/m.pre_close-1 END) market_return
-              FROM read_parquet('{_sql_path(raw_path)}') f
+              FROM universe_keys f
               LEFT JOIN research.market_daily m ON m.trade_date=f.session AND m.ts_code=f.instrument_id
-              WHERE f.factor_id='book-to-price' GROUP BY 1
+              GROUP BY 1
             ), features AS (
               SELECT session,
                 sum(ln(1+market_return)) OVER (ORDER BY session ROWS BETWEEN 59 PRECEDING AND CURRENT ROW) trend_score,
@@ -566,15 +576,33 @@ def _register(
         connection.close()
 
 
-def publish(database: Path, factor_store: Path, evidence_store: Path) -> dict[str, Any]:
-    references, loaded = _load_factor_inputs(factor_store)
+def publish(
+    database: Path,
+    factor_store: Path,
+    evidence_store: Path,
+    *,
+    raw_release_id: str = RAW_RELEASE_ID,
+    processed_release_ids: tuple[str, ...] = PROCESSED_RELEASE_IDS,
+    family_id: str = FAMILY_ID,
+    folds: tuple[WalkForwardFoldSpec, ...] | None = None,
+    window: DateRange | None = None,
+    engine_version: str = ENGINE_VERSION,
+) -> dict[str, Any]:
+    selected_folds = folds or _folds()
+    selected_window = window or DateRange(start=date(2020, 1, 2), end=date(2025, 12, 31))
+    references, loaded = _load_factor_inputs(factor_store, (raw_release_id, *processed_release_ids))
     raw_manifest, raw_path = loaded["RAW"]
     if not isinstance(raw_manifest, FactorReleaseManifest):
         raise ValueError("RAW input must be a FactorReleaseManifest")
-    label_manifest, label_path, label_cache = _publish_labels(
-        database, evidence_store, raw_manifest, raw_path
+    label_manifest, label_path, label_cache = _publish_labels(database, evidence_store, raw_manifest, raw_path)
+    request = _request(
+        references,
+        label_manifest,
+        family_id=family_id,
+        folds=selected_folds,
+        window=selected_window,
+        engine_version=engine_version,
     )
-    request = _request(references, label_manifest)
     _reserve_exposure(database, request)
     directory = evidence_store / "walk_forward" / request.walk_forward_id.removeprefix("sha256:")
     manifest_path = directory / "manifest.json"
@@ -602,14 +630,15 @@ def publish(database: Path, factor_store: Path, evidence_store: Path) -> dict[st
     _write_parquet(targets["regime_statistics"], regimes)
     _write_parquet(targets["family_summary"], [summary])
     with duckdb.connect() as connection:
-        daily_count = connection.execute(
-            f"SELECT count(*) FROM read_parquet('{_sql_path(daily_path)}')"
-        ).fetchone()[0]
+        daily_count = connection.execute(f"SELECT count(*) FROM read_parquet('{_sql_path(daily_path)}')").fetchone()[0]
         duplicate_count = connection.execute(
             f"""SELECT count(*) FROM (SELECT variant,session,factor_id,factor_version,count(*) n
             FROM read_parquet('{_sql_path(daily_path)}') GROUP BY 1,2,3,4 HAVING n>1)"""
         ).fetchone()[0]
-    if duplicate_count or len(hypotheses) != 117 or len(regimes) != 468:
+    entity_count = len({(item["variant"], item["factor_id"], item["factor_version"]) for item in hypotheses})
+    expected_hypotheses = len(request.evaluation.folds) * entity_count
+    expected_regimes = expected_hypotheses * 4
+    if duplicate_count or len(hypotheses) != expected_hypotheses or len(regimes) != expected_regimes:
         raise ValueError(
             f"walk-forward quality gate failed duplicates={duplicate_count} "
             f"hypotheses={len(hypotheses)} regimes={len(regimes)}"
@@ -637,14 +666,14 @@ def publish(database: Path, factor_store: Path, evidence_store: Path) -> dict[st
         quality_status="PASS",
         decision_status="NO_PROMOTION_DIAGNOSTIC_AND_PSEUDO_OOS",
         limitations=(
-            "WF-2023 and WF-2024 are retrospective diagnostics, not unseen tests.",
-            (
-                "WF-2025 is a first research read of an already locally available historical window, "
-                "not live prospective OOS."
-            ),
+            "Fold exposure status is recorded per configured fold; retrospective folds are not unseen tests.",
+            "A frozen historical first read is pseudo-OOS, not live prospective OOS.",
             "The provisional label is not price-limit, delisting-return, or transaction-cost aware.",
             "Market regimes are PIT trailing diagnostics and do not prove structural stability.",
-            "All 117 fold-factor-variant tests share one BH-FDR family; no failed test may be removed.",
+            (
+                f"All {expected_hypotheses} configured fold-factor-variant tests share one BH-FDR family; "
+                "no failed test may be removed."
+            ),
         ),
     )
     _atomic_write(manifest_path, canonical_json_bytes(manifest))
@@ -670,8 +699,25 @@ def main() -> int:
     parser.add_argument("--database", type=Path, default=Path("data/warehouse/alpha_research.duckdb"))
     parser.add_argument("--factor-store", type=Path, default=Path("data/factor_store"))
     parser.add_argument("--evidence-store", type=Path, default=Path("data/evidence_store"))
+    parser.add_argument("--raw-release-id", default=RAW_RELEASE_ID)
+    parser.add_argument("--processed-release-id", action="append", dest="processed_release_ids")
+    parser.add_argument("--family-id", default=FAMILY_ID)
     args = parser.parse_args()
-    print(json.dumps(publish(args.database, args.factor_store, args.evidence_store), ensure_ascii=False, indent=2))
+    processed_release_ids = tuple(args.processed_release_ids) if args.processed_release_ids else PROCESSED_RELEASE_IDS
+    print(
+        json.dumps(
+            publish(
+                args.database,
+                args.factor_store,
+                args.evidence_store,
+                raw_release_id=args.raw_release_id,
+                processed_release_ids=processed_release_ids,
+                family_id=args.family_id,
+            ),
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     return 0
 
 

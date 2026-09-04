@@ -86,6 +86,14 @@ data/warehouse/
 - `research.factor_walk_forward_decisions`：将 FDR 拒绝进一步拆成方向支持、方向证伪和未拒绝，避免把反向显著误称为发现。
 - `raw.factor_regime_statistics`：按 PIT 趋势和波动状态形成的条件 RankIC 诊断。
 - `research.walk_forward_family_summary`：117 个 Walk-Forward 假设的统一检验家族摘要。
+- `raw.factor_value_correlation_daily`：M4.5 月末抽样日的逐对截面因子秩相关。
+- `research.factor_correlation_summary`：因子值相关与全窗口日度 RankIC 相关的逐对摘要。
+- `research.factor_variant_deduplication`：39 条因子×变体路径的近重复组、canonical 路径和折叠决定。
+- `raw.factor_hierarchical_linkage`：使用冻结绝对相关距离的完整平均连接树。
+- `research.factor_clusters`：canonical 路径所属信息簇、机械代表项、覆盖率和代表选择状态。
+- `raw.factor_conditional_rank_ic_daily`：控制其他簇代表项后的日度半偏/偏 RankIC 与增量 R²。
+- `research.factor_incremental_value_summary`：25 条 canonical 路径的 HAC、块自助法、BH-FDR 和方向判定。
+- `research.factor_redundancy_family_summary`：M4.5 统一检验家族、重点证伪和禁止晋级状态摘要。
 
 因子和标签代码应优先依赖 `research` 层。需要复核供应商字段或追溯证据时才直接查询 `raw` 层。
 
@@ -107,6 +115,9 @@ data/warehouse/
 - `metadata.robustness_evidence_manifest`：M4.3 统计规格、输入 Evidence、检验家族和输出文件哈希。
 - `metadata.walk_forward_evidence_manifest`：M4.4 Fold、输入发布、统计规格、文件哈希、限制和决策状态。
 - `metadata.holdout_exposure_ledger`：Holdout/伪 OOS 区间读取前写入的不可逆暴露记录。
+- `metadata.factor_redundancy_evidence_manifest`：M4.5 输入血缘、冻结阈值、账本快照、文件哈希和诊断决定。
+
+M4.7 Explorer 不新增或回写 DuckDB 表。它以只读连接读取以上 Manifest、研究视图和 M4.5 Parquet，生成 `reports/factor_explorer/<report_id>/` 静态投影；报告 Manifest 明确标记为 `READ_ONLY_DERIVED_REPORT_NOT_EVIDENCE`。
 
 ## 5. 常用 SQL
 
