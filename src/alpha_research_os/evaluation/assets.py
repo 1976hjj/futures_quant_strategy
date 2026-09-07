@@ -84,6 +84,63 @@ class EvidenceFile(FrozenSpec):
     row_count: int = Field(ge=0)
 
 
+class ScoreInputRef(FrozenSpec):
+    """A generic score/prediction table consumed by the common execution layer."""
+
+    input_id: Digest
+    manifest_hash: Digest
+    parquet_hash: Digest
+    score_namespace: Identifier
+
+
+class ExecutionEvidenceRequest(FrozenSpec):
+    schema_version: Literal["1"] = "1"
+    engine_version: Version
+    score_input: ScoreInputRef
+    m2e_core_checkpoint_hash: Digest
+    execution_spec_hash: Digest
+    universe_id: Identifier
+    start: date
+    end: date
+    selection_quantile: float = Field(default=0.20, gt=0, lt=1)
+    capital_scenarios_cny: tuple[int, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> ExecutionEvidenceRequest:
+        if self.end < self.start:
+            raise ValueError("execution evidence end must not precede start")
+        if tuple(sorted(set(self.capital_scenarios_cny))) != self.capital_scenarios_cny:
+            raise ValueError("capital scenarios must be sorted and unique")
+        if any(value <= 0 for value in self.capital_scenarios_cny):
+            raise ValueError("capital scenarios must be positive")
+        return self
+
+    @property
+    def execution_evidence_id(self) -> Digest:
+        return content_hash(self)
+
+
+class ExecutionEvidenceManifest(FrozenSpec):
+    schema_version: Literal["1"] = "1"
+    execution_evidence_id: Digest
+    request: ExecutionEvidenceRequest
+    created_at: datetime
+    files: tuple[EvidenceFile, ...] = Field(min_length=1)
+    score_count: int = Field(ge=1)
+    quality_status: Literal["PASS"]
+    decision_status: Literal["EXECUTION_DIAGNOSTIC_EXPOSED_SAMPLE"]
+    limitations: tuple[str, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def identity_matches(self) -> ExecutionEvidenceManifest:
+        if self.execution_evidence_id != self.request.execution_evidence_id:
+            raise ValueError("execution evidence identity must equal its immutable request identity")
+        names = [item.name for item in self.files]
+        if names != sorted(set(names)):
+            raise ValueError("execution evidence files must be sorted and unique")
+        return self
+
+
 class EvidenceBundleManifest(FrozenSpec):
     schema_version: Literal["1"] = "1"
     evidence_id: Digest

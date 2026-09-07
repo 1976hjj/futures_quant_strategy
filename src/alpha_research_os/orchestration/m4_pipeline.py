@@ -93,7 +93,50 @@ class M4FactorExplorerConfig(FrozenSpec):
     output_root: str = "reports/factor_explorer"
     robustness_id: Digest | None = None
     basic_evidence_ids: tuple[Digest, ...] = ()
+    execution_evidence_id: Digest | None = None
     maximum_compare_entities: int = Field(default=6, ge=2, le=12)
+
+
+class M4ExecutionConfig(FrozenSpec):
+    window_start: date
+    window_end: date
+    source_execution_evidence_id: Digest | None = None
+    holding_sessions: Literal[5, 10, 20, 30] = 5
+    selection_quantile: float = Field(default=0.20, gt=0, lt=1)
+    capital_scenarios_cny: tuple[int, ...] = (1_000_000, 10_000_000, 100_000_000)
+    buy_commission_bps: float = Field(default=3.0, ge=0)
+    sell_commission_bps: float = Field(default=3.0, ge=0)
+    sell_stamp_duty_bps: float = Field(default=5.0, ge=0)
+    base_slippage_bps: float = Field(default=2.0, ge=0)
+    square_root_impact_bps: float = Field(default=20.0, ge=0)
+    maximum_slippage_bps: float = Field(default=100.0, ge=0)
+    maximum_participation_rate: float = Field(default=0.10, gt=0, le=1)
+
+    @model_validator(mode="after")
+    def valid_window(self) -> M4ExecutionConfig:
+        if self.window_end < self.window_start:
+            raise ValueError("execution window end must not precede start")
+        if tuple(sorted(set(self.capital_scenarios_cny))) != self.capital_scenarios_cny:
+            raise ValueError("execution capital scenarios must be sorted and unique")
+        if any(value <= 0 for value in self.capital_scenarios_cny):
+            raise ValueError("execution capital scenarios must be positive")
+        return self
+
+
+class M4BasicEvidenceConfig(FrozenSpec):
+    window_start: date | None = None
+    window_end: date | None = None
+    holding_sessions: Literal[5, 10, 20, 30] = 5
+    quantile_count: int = Field(default=5, ge=2, le=20)
+    minimum_pairs_per_session: int = Field(default=20, ge=3)
+
+    @model_validator(mode="after")
+    def valid_window(self) -> M4BasicEvidenceConfig:
+        if (self.window_start is None) != (self.window_end is None):
+            raise ValueError("basic evidence window requires both start and end")
+        if self.window_start is not None and self.window_end is not None and self.window_end < self.window_start:
+            raise ValueError("basic evidence window end must not precede start")
+        return self
 
 
 class M4PipelineConfig(FrozenSpec):
@@ -111,6 +154,8 @@ class M4PipelineConfig(FrozenSpec):
             "redundancy",
             "audit_walk_forward",
             "audit_redundancy",
+            "execution",
+            "audit_execution",
             "factor_explorer",
             "audit_factor_explorer",
         ],
@@ -123,6 +168,8 @@ class M4PipelineConfig(FrozenSpec):
     walk_forward: M4WalkForwardConfig | None = None
     redundancy: M4RedundancyConfig | None = None
     factor_explorer: M4FactorExplorerConfig | None = None
+    execution: M4ExecutionConfig | None = None
+    basic_evidence: M4BasicEvidenceConfig = Field(default_factory=M4BasicEvidenceConfig)
 
     @model_validator(mode="after")
     def valid_stage_dependencies(self) -> M4PipelineConfig:
@@ -168,6 +215,11 @@ class M4PipelineConfig(FrozenSpec):
                     raise ValueError("factor_explorer requires a producing redundancy stage or source ID")
         if "audit_factor_explorer" in self.stages and "factor_explorer" not in self.stages:
             raise ValueError("factor Explorer audit requires its producing stage")
+        if any(stage in self.stages for stage in ("execution", "audit_execution")) and self.execution is None:
+            raise ValueError("execution stages require execution configuration")
+        if "audit_execution" in self.stages and "execution" not in self.stages:
+            if self.execution is None or self.execution.source_execution_evidence_id is None:
+                raise ValueError("execution audit requires a producing stage or source_execution_evidence_id")
         return self
 
     @property

@@ -21,6 +21,7 @@ from alpha_research_os.evaluation import (
     LabelAssetRequest,
     LabelReleaseManifest,
     default_forward_5d_label_spec,
+    forward_return_label_spec,
 )
 from alpha_research_os.factors.assets import FactorReleaseManifest, ProcessedFactorReleaseManifest
 from alpha_research_os.kernel.canonical import canonical_json_bytes, content_hash
@@ -87,7 +88,9 @@ def _label_sql(
     label_version: str,
     start: date,
     end: date,
+    exit_session_offset: int,
 ) -> str:
+    scope_days = (exit_session_offset - 1) * 2 + 14
     return f"""
     COPY (
       WITH calendar AS (
@@ -96,24 +99,25 @@ def _label_sql(
       ), signals AS (
         SELECT DISTINCT session AS signal_session, instrument_id
         FROM read_parquet('{_sql_path(factor_parquet)}')
+        WHERE session BETWEEN DATE {_sql_string(start.isoformat())} AND DATE {_sql_string(end.isoformat())}
       ), market_scope AS (
         SELECT * FROM research.market_daily
         WHERE trade_date BETWEEN DATE {_sql_string(start.isoformat())}
-                             AND DATE {_sql_string(end.isoformat())} + INTERVAL 30 DAYS
+                             AND DATE {_sql_string(end.isoformat())} + INTERVAL {scope_days} DAYS
       ), adjustment_scope AS (
         SELECT * FROM research.adj_factor
         WHERE trade_date BETWEEN DATE {_sql_string(start.isoformat())}
-                             AND DATE {_sql_string(end.isoformat())} + INTERVAL 30 DAYS
+                             AND DATE {_sql_string(end.isoformat())} + INTERVAL {scope_days} DAYS
       ), state_scope AS (
         SELECT * FROM research.security_session_state
         WHERE trade_date BETWEEN DATE {_sql_string(start.isoformat())}
-                             AND DATE {_sql_string(end.isoformat())} + INTERVAL 30 DAYS
+                             AND DATE {_sql_string(end.isoformat())} + INTERVAL {scope_days} DAYS
       ), targets AS (
         SELECT s.*, entry.cal_date AS entry_session, exit.cal_date AS exit_session
         FROM signals s
         LEFT JOIN calendar signal ON signal.cal_date=s.signal_session
         LEFT JOIN calendar entry ON entry.session_number=signal.session_number+1
-        LEFT JOIN calendar exit ON exit.session_number=signal.session_number+6
+        LEFT JOIN calendar exit ON exit.session_number=signal.session_number+{exit_session_offset}
       ), inputs AS (
         SELECT
           t.*,
@@ -184,8 +188,19 @@ def _publish_labels(
     evidence_store: Path,
     factor_manifest: FactorInputManifest,
     factor_parquet: Path,
+    horizon_sessions: int = 5,
+    window_start: date | None = None,
+    window_end: date | None = None,
 ) -> tuple[LabelReleaseManifest, Path, bool]:
-    label_spec = default_forward_5d_label_spec()
+    label_spec = (
+        default_forward_5d_label_spec() if horizon_sessions == 5 else forward_return_label_spec(horizon_sessions)
+    )
+    selected_start = window_start or factor_manifest.request.start
+    selected_end = window_end or factor_manifest.request.end
+    if selected_start < factor_manifest.request.start or selected_end > factor_manifest.request.end:
+        raise ValueError("label window must stay inside the factor release coverage")
+    if selected_end < selected_start:
+        raise ValueError("label window end must not precede start")
     request = LabelAssetRequest(
         engine_version=LABEL_ENGINE_VERSION,
         label_id=label_spec.label_id,
@@ -195,8 +210,8 @@ def _publish_labels(
         dataset_lineage=factor_manifest.request.dataset_lineage,
         universe_id=factor_manifest.request.universe_id,
         universe_version=factor_manifest.request.universe_version,
-        start=factor_manifest.request.start,
-        end=factor_manifest.request.end,
+        start=selected_start,
+        end=selected_end,
         constraint_level=ExecutionConstraintLevel.BAR_AND_SUSPENSION_ONLY,
     )
     release_dir = evidence_store / "labels" / request.computation_key.removeprefix("sha256:")
@@ -220,6 +235,7 @@ def _publish_labels(
                 label_spec.label_version,
                 request.start,
                 request.end,
+                label_spec.exit.session_offset,
             )
         )
     with duckdb.connect() as connection:
@@ -229,7 +245,13 @@ def _publish_labels(
             count(*)-count(DISTINCT (signal_session, instrument_id)),
             count(*) FILTER (WHERE value IS NOT NULL AND NOT isfinite(value)) FROM {source}"""
         ).fetchone()
-    if duplicates or nonfinite or row_count != factor_manifest.row_count // factor_manifest.factor_count:
+        expected_rows = connection.execute(
+            f"""SELECT count(*) FROM (
+            SELECT DISTINCT session, instrument_id FROM read_parquet('{_sql_path(factor_parquet)}')
+            WHERE session BETWEEN DATE {_sql_string(request.start.isoformat())}
+                              AND DATE {_sql_string(request.end.isoformat())})"""
+        ).fetchone()[0]
+    if duplicates or nonfinite or row_count != expected_rows:
         raise ValueError(f"label quality gate failed rows={row_count} duplicates={duplicates} nonfinite={nonfinite}")
     os.replace(temporary, parquet)
     manifest = LabelReleaseManifest(
@@ -254,7 +276,7 @@ def _paired_ctes(factor_path: str, label_path: str) -> str:
         SELECT f.session, f.instrument_id, f.factor_id, f.factor_version, f.value AS factor_value,
                l.value AS label_value, l.is_valid AS label_valid
         FROM read_parquet('{factor_path}') f
-        LEFT JOIN read_parquet('{label_path}') l
+        JOIN read_parquet('{label_path}') l
           ON l.signal_session=f.session AND l.instrument_id=f.instrument_id
       ), paired_base AS (
         SELECT * FROM joined WHERE factor_value IS NOT NULL AND label_valid AND label_value IS NOT NULL
@@ -397,13 +419,15 @@ def _publish_evidence(
     factor_parquet: Path,
     label_manifest: LabelReleaseManifest,
     label_parquet: Path,
+    quantile_count: int = 5,
+    minimum_pairs: int = 20,
 ) -> tuple[EvidenceBundleManifest, bool]:
     request = BasicEvidenceRequest(
         evaluator_version=EVALUATOR_VERSION,
         factor_release_id=factor_manifest.release_id,
         label_release_id=label_manifest.release_id,
-        quantile_count=5,
-        minimum_pairs_per_session=20,
+        quantile_count=quantile_count,
+        minimum_pairs_per_session=minimum_pairs,
         factor_variant=factor_manifest.request.variant,
     )
     bundle_dir = evidence_store / "bundles" / request.evidence_id.removeprefix("sha256:")
@@ -424,7 +448,13 @@ def _publish_evidence(
     with duckdb.connect(str(database), read_only=True) as connection:
         _configure_bounded_connection(connection, evidence_store / "duckdb_tmp")
         connection.execute(
-            _daily_sql(factor_parquet, label_parquet, temporary["daily_metrics"], request.evidence_id, 20)
+            _daily_sql(
+                factor_parquet,
+                label_parquet,
+                temporary["daily_metrics"],
+                request.evidence_id,
+                request.minimum_pairs_per_session,
+            )
         )
         connection.execute(
             _quantile_sql(
@@ -432,8 +462,8 @@ def _publish_evidence(
                 label_parquet,
                 temporary["quantile_returns"],
                 request.evidence_id,
-                5,
-                20,
+                request.quantile_count,
+                request.minimum_pairs_per_session,
             )
         )
         connection.execute(
@@ -444,8 +474,8 @@ def _publish_evidence(
                 temporary["quantile_returns"],
                 temporary["factor_summary"],
                 request.evidence_id,
-                5,
-                20,
+                request.quantile_count,
+                request.minimum_pairs_per_session,
             )
         )
     files = []
@@ -595,7 +625,18 @@ def _register(
         connection.close()
 
 
-def run(database: Path, factor_store: Path, evidence_store: Path, factor_release_id: str) -> dict[str, Any]:
+def run(
+    database: Path,
+    factor_store: Path,
+    evidence_store: Path,
+    factor_release_id: str,
+    *,
+    horizon_sessions: int = 5,
+    quantile_count: int = 5,
+    minimum_pairs: int = 20,
+    window_start: date | None = None,
+    window_end: date | None = None,
+) -> dict[str, Any]:
     factor_manifest, factor_parquet = _factor_manifest(factor_store, factor_release_id)
     label_source_manifest = factor_manifest
     label_source_parquet = factor_parquet
@@ -606,7 +647,13 @@ def run(database: Path, factor_store: Path, evidence_store: Path, factor_release
         label_source_manifest = parent_manifest
         label_source_parquet = parent_parquet
     label_manifest, label_parquet, label_cache_hit = _publish_labels(
-        database, evidence_store, label_source_manifest, label_source_parquet
+        database,
+        evidence_store,
+        label_source_manifest,
+        label_source_parquet,
+        horizon_sessions,
+        window_start,
+        window_end,
     )
     evidence_manifest, evidence_cache_hit = _publish_evidence(
         database,
@@ -615,6 +662,8 @@ def run(database: Path, factor_store: Path, evidence_store: Path, factor_release
         factor_parquet,
         label_manifest,
         label_parquet,
+        quantile_count,
+        minimum_pairs,
     )
     _register(database, evidence_store, label_manifest, evidence_manifest)
     return {
@@ -641,8 +690,28 @@ def main() -> int:
     parser.add_argument("--factor-store", type=Path, default=Path("data/factor_store"))
     parser.add_argument("--evidence-store", type=Path, default=Path("data/evidence_store"))
     parser.add_argument("--factor-release-id", default=DEFAULT_FACTOR_RELEASE_ID)
+    parser.add_argument("--holding-sessions", type=int, choices=(5, 10, 20, 30), default=5)
+    parser.add_argument("--quantile-count", type=int, default=5)
+    parser.add_argument("--minimum-pairs", type=int, default=20)
+    parser.add_argument("--start", type=date.fromisoformat)
+    parser.add_argument("--end", type=date.fromisoformat)
     args = parser.parse_args()
-    print(json.dumps(run(args.database, args.factor_store, args.evidence_store, args.factor_release_id), indent=2))
+    print(
+        json.dumps(
+            run(
+                args.database,
+                args.factor_store,
+                args.evidence_store,
+                args.factor_release_id,
+                horizon_sessions=args.holding_sessions,
+                quantile_count=args.quantile_count,
+                minimum_pairs=args.minimum_pairs,
+                window_start=args.start,
+                window_end=args.end,
+            ),
+            indent=2,
+        )
+    )
     return 0
 
 

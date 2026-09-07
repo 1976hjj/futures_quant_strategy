@@ -73,8 +73,20 @@ def audit(report_directory: Path, database: Path, evidence_store: Path) -> dict[
         failures.append("noncanonical paths incorrectly contain path-level incremental evidence")
     if any(item["canonical_incremental"] is None for item in duplicate_paths):
         failures.append("noncanonical paths cannot resolve their canonical incremental evidence")
-    if any(item["execution"]["status"] != "NOT_AVAILABLE" for item in factors):
-        failures.append("M4.6 execution placeholders are not consistently NOT_AVAILABLE")
+    execution_source = next(
+        (item for item in manifest["request"]["source_manifests"] if item["kind"] == "EXECUTION"), None
+    )
+    if execution_source is None:
+        if any(item["execution"]["status"] != "NOT_AVAILABLE" for item in factors):
+            failures.append("execution is shown as available without M4.6 lineage")
+    else:
+        available = [item for item in factors if item["execution"]["status"] == "AVAILABLE"]
+        if not available or any(item["variant"] != "RAW" for item in available):
+            failures.append("M4.6 execution evidence must map only to matching RAW score paths")
+        if any(
+            item["execution"].get("execution_evidence_id") != execution_source["asset_id"] for item in available
+        ):
+            failures.append("factor execution lineage differs from Explorer source lineage")
     if any(item["model_contribution"]["status"] != "NOT_AVAILABLE" for item in factors):
         failures.append("M6 model placeholders are not consistently NOT_AVAILABLE")
 

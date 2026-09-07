@@ -8,8 +8,10 @@ from alpha_research_os.evaluation import (
     BasicEvidenceRequest,
     EvidenceInputRef,
     ExecutionConstraintLevel,
+    ExecutionEvidenceRequest,
     LabelAssetRequest,
     RobustnessEvidenceRequest,
+    ScoreInputRef,
     StatisticalInferenceSpec,
     WalkForwardEvaluationSpec,
     WalkForwardFoldSpec,
@@ -59,6 +61,27 @@ def test_evidence_identity_binds_factor_label_and_evaluator() -> None:
 
     assert request.evidence_id != changed_label.evidence_id
     assert request.evidence_id != changed_quantiles.evidence_id
+
+
+def test_execution_evidence_identity_binds_costs_data_and_capital() -> None:
+    score_input = ScoreInputRef(
+        input_id=DIGEST_A,
+        manifest_hash=DIGEST_A,
+        parquet_hash=DIGEST_B,
+        score_namespace="FACTOR",
+    )
+    request = ExecutionEvidenceRequest(
+        engine_version="execution-v1",
+        score_input=score_input,
+        m2e_core_checkpoint_hash=DIGEST_A,
+        execution_spec_hash=DIGEST_B,
+        universe_id="ALL-A-PIT",
+        start=date(2020, 1, 2),
+        end=date(2025, 12, 31),
+        capital_scenarios_cny=(1_000_000, 10_000_000),
+    )
+    changed = request.model_copy(update={"capital_scenarios_cny": (1_000_000, 100_000_000)})
+    assert request.execution_evidence_id != changed.execution_evidence_id
 
 
 def test_m4_3_identity_binds_complete_test_family_and_frozen_parameters() -> None:

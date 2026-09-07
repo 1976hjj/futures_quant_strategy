@@ -35,6 +35,7 @@ class FactorExplorerConfig(FrozenSpec):
     redundancy_id: Digest
     robustness_id: Digest | None = None
     basic_evidence_ids: tuple[Digest, ...] = ()
+    execution_evidence_id: Digest | None = None
     maximum_compare_entities: int = Field(default=6, ge=2, le=12)
 
 
@@ -80,7 +81,11 @@ def _one(
 def _asset_manifest(evidence_store: Path, category: str, asset_id: str) -> tuple[dict[str, Any], Path]:
     path = evidence_store / category / asset_id.removeprefix("sha256:") / "manifest.json"
     payload = json.loads(path.read_text(encoding="utf-8"))
-    identity_key = "walk_forward_id" if category == "walk_forward" else "redundancy_id"
+    identity_key = {
+        "walk_forward": "walk_forward_id",
+        "redundancy": "redundancy_id",
+        "execution": "execution_evidence_id",
+    }[category]
     if payload.get(identity_key) != asset_id:
         raise ValueError(f"{category} manifest identity mismatch")
     return payload, path
@@ -224,6 +229,16 @@ def _report_payload(
     label_request = json.loads(label_metadata["request_json"])
     walk_manifest, _ = _asset_manifest(evidence_store, "walk_forward", config.walk_forward_id)
     redundancy_manifest, _ = _asset_manifest(evidence_store, "redundancy", config.redundancy_id)
+    execution_manifest = None
+    execution_by_score: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    if config.execution_evidence_id is not None:
+        execution_manifest, _ = _asset_manifest(evidence_store, "execution", config.execution_evidence_id)
+        execution_summary_path = _artifact_path(evidence_store, execution_manifest, "entity_summary")
+        for row in _rows(
+            connection,
+            f"SELECT * FROM read_parquet('{_sql_path(execution_summary_path)}') ORDER BY capital_cny",
+        ):
+            execution_by_score.setdefault((row["score_id"], row["score_version"]), []).append(row)
 
     source_manifests = [
         {
@@ -242,6 +257,19 @@ def _report_payload(
             "manifest_hash": redundancy_metadata["manifest_hash"],
         },
     ]
+    if config.execution_evidence_id is not None:
+        source_manifests.append(
+            {
+                "kind": "EXECUTION",
+                "asset_id": config.execution_evidence_id,
+                "manifest_hash": _sha256_file(
+                    evidence_store
+                    / "execution"
+                    / config.execution_evidence_id.removeprefix("sha256:")
+                    / "manifest.json"
+                ),
+            }
+        )
     robustness_metadata: dict[str, Any] | None = None
     evidence_ids = config.basic_evidence_ids
     if config.robustness_id is not None:
@@ -365,10 +393,13 @@ def _report_payload(
                 if outcome
             }
         )
+        execution_rows = execution_by_score.get(key, []) if first["variant"] == "RAW" else []
+        execution_available = bool(execution_rows)
         routes = derive_routes(
             is_canonical=bool(dedup_row.get("is_canonical", True)),
             fold_outcomes=outcomes,
             sample_classification=redundancy_metadata["sample_classification"],
+            execution_available=execution_available,
         )
         factors.append(
             {
@@ -396,7 +427,22 @@ def _report_payload(
                 "incremental": incremental.get(entity_id),
                 "canonical_incremental": incremental.get(dedup_row.get("canonical_entity_id", entity_id)),
                 "routes": routes,
-                "execution": {"status": "NOT_AVAILABLE", "reason": "M4.6_NOT_PUBLISHED"},
+                "execution": (
+                    {
+                        "status": "AVAILABLE",
+                        "execution_evidence_id": config.execution_evidence_id,
+                        "capital_scenarios": execution_rows,
+                    }
+                    if execution_available
+                    else {
+                        "status": "NOT_AVAILABLE",
+                        "reason": (
+                            "M4.6_RAW_SCORE_ONLY_FOR_THIS_RELEASE"
+                            if config.execution_evidence_id is not None
+                            else "M4.6_NOT_PUBLISHED"
+                        ),
+                    }
+                ),
                 "model_contribution": {"status": "NOT_AVAILABLE", "reason": "M6_NOT_PUBLISHED"},
             }
         )
@@ -454,7 +500,14 @@ def _report_payload(
             "walk_forward_id": config.walk_forward_id,
             "redundancy_id": config.redundancy_id,
             "robustness_id": config.robustness_id,
-            "limitations": sorted(set(walk_manifest["limitations"] + redundancy_manifest["limitations"])),
+            "execution_evidence_id": config.execution_evidence_id,
+            "limitations": sorted(
+                set(
+                    walk_manifest["limitations"]
+                    + redundancy_manifest["limitations"]
+                    + ([] if execution_manifest is None else execution_manifest["limitations"])
+                )
+            ),
         },
         "summary": summary,
         "factors": factors,

@@ -129,3 +129,17 @@ def test_factor_explorer_audit_requires_producing_stage() -> None:
 
     with pytest.raises(ValidationError, match="audit requires its producing stage"):
         M4PipelineConfig.model_validate(payload)
+
+
+def test_execution_audit_requires_output_or_pinned_source() -> None:
+    payload = _base(
+        stages=["audit_execution"],
+        execution={"window_start": "2020-01-01", "window_end": "2022-12-31"},
+        walk_forward=None,
+        redundancy=None,
+    )
+    with pytest.raises(ValidationError, match="execution audit requires"):
+        M4PipelineConfig.model_validate(payload)
+
+    payload["execution"]["source_execution_evidence_id"] = DIGEST_A  # type: ignore[index]
+    assert M4PipelineConfig.model_validate(payload).execution is not None

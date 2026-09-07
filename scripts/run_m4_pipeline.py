@@ -23,16 +23,19 @@ from audit_m4_1_evidence import audit as audit_basic_evidence  # noqa: E402
 from audit_m4_3_robustness import audit as audit_robustness  # noqa: E402
 from audit_m4_4_walk_forward import audit as audit_walk_forward  # noqa: E402
 from audit_m4_5_redundancy import audit as audit_redundancy  # noqa: E402
+from audit_m4_6_execution import audit as audit_execution  # noqa: E402
 from publish_processed_factor_release import publish as publish_processed  # noqa: E402
 from run_m4_1_evidence import run as run_basic_evidence  # noqa: E402
 from run_m4_3_robustness import publish as publish_robustness  # noqa: E402
 from run_m4_4_walk_forward import publish as publish_walk_forward  # noqa: E402
 from run_m4_5_redundancy import publish as publish_redundancy  # noqa: E402
+from run_m4_6_execution import publish as publish_execution  # noqa: E402
 
 from alpha_research_os.evaluation import WalkForwardFoldSpec  # noqa: E402
 from alpha_research_os.kernel.canonical import canonical_json_bytes  # noqa: E402
 from alpha_research_os.kernel.specs import DateRange  # noqa: E402
 from alpha_research_os.orchestration import M4PipelineConfig  # noqa: E402
+from alpha_research_os.portfolio import DailyBarExecutionSpec  # noqa: E402
 from alpha_research_os.reporting import FactorExplorerConfig, build_factor_explorer  # noqa: E402
 
 STAGE_ORDER = (
@@ -45,6 +48,8 @@ STAGE_ORDER = (
     "redundancy",
     "audit_walk_forward",
     "audit_redundancy",
+    "execution",
+    "audit_execution",
     "factor_explorer",
     "audit_factor_explorer",
 )
@@ -156,6 +161,7 @@ def execute(config: M4PipelineConfig, *, validate_only: bool = False) -> dict[st
         robustness_id = config.robustness.source_robustness_id if config.robustness else None
         walk_forward_id = config.walk_forward.source_walk_forward_id if config.walk_forward else None
         redundancy_id = config.redundancy.source_redundancy_id if config.redundancy else None
+        execution_id = config.execution.source_execution_evidence_id if config.execution else None
         factor_explorer_directory: Path | None = None
 
         for stage in STAGE_ORDER:
@@ -173,7 +179,17 @@ def execute(config: M4PipelineConfig, *, validate_only: bool = False) -> dict[st
             elif stage == "basic_evidence":
                 outputs = []
                 for release_id in (config.raw_factor_release_id, *processed_ids):
-                    result = run_basic_evidence(database, factor_store, evidence_store, release_id)
+                    result = run_basic_evidence(
+                        database,
+                        factor_store,
+                        evidence_store,
+                        release_id,
+                        horizon_sessions=config.basic_evidence.holding_sessions,
+                        quantile_count=config.basic_evidence.quantile_count,
+                        minimum_pairs=config.basic_evidence.minimum_pairs_per_session,
+                        window_start=config.basic_evidence.window_start,
+                        window_end=config.basic_evidence.window_end,
+                    )
                     outputs.append(result)
                     evidence_ids.append(result["evidence_id"])
                 stage_result = outputs
@@ -260,6 +276,35 @@ def execute(config: M4PipelineConfig, *, validate_only: bool = False) -> dict[st
                 )
                 if stage_result["status"] == "FAIL":
                     raise ValueError("redundancy audit failed")
+            elif stage == "execution":
+                assert config.execution is not None
+                stage_result = publish_execution(
+                    database,
+                    factor_store,
+                    evidence_store,
+                    config.raw_factor_release_id,
+                    config.execution.window_start,
+                    config.execution.window_end,
+                    holding_sessions=config.execution.holding_sessions,
+                    selection_quantile=config.execution.selection_quantile,
+                    capital=config.execution.capital_scenarios_cny,
+                    execution_spec=DailyBarExecutionSpec(
+                        buy_commission_bps=config.execution.buy_commission_bps,
+                        sell_commission_bps=config.execution.sell_commission_bps,
+                        sell_stamp_duty_bps=config.execution.sell_stamp_duty_bps,
+                        base_slippage_bps=config.execution.base_slippage_bps,
+                        square_root_impact_bps=config.execution.square_root_impact_bps,
+                        maximum_slippage_bps=config.execution.maximum_slippage_bps,
+                        maximum_participation_rate=config.execution.maximum_participation_rate,
+                    ),
+                )
+                execution_id = stage_result["execution_evidence_id"]
+            elif stage == "audit_execution":
+                if execution_id is None:
+                    raise ValueError("execution audit source ID is unavailable")
+                stage_result = audit_execution(database, evidence_store, execution_id)
+                if stage_result["status"] == "FAIL":
+                    raise ValueError("execution audit failed")
             elif stage == "factor_explorer":
                 if walk_forward_id is None or redundancy_id is None or config.factor_explorer is None:
                     raise ValueError("factor Explorer source IDs or configuration are unavailable")
@@ -273,6 +318,7 @@ def execute(config: M4PipelineConfig, *, validate_only: bool = False) -> dict[st
                     redundancy_id=redundancy_id,
                     robustness_id=config.factor_explorer.robustness_id or robustness_id,
                     basic_evidence_ids=config.factor_explorer.basic_evidence_ids,
+                    execution_evidence_id=config.factor_explorer.execution_evidence_id or execution_id,
                     maximum_compare_entities=config.factor_explorer.maximum_compare_entities,
                 )
                 stage_result = build_factor_explorer(explorer, PROJECT_ROOT)

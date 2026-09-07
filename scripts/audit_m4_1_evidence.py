@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -90,6 +91,8 @@ def audit(
         key_mismatch = connection.execute(
             f"""WITH factor_keys AS (
               SELECT DISTINCT session, instrument_id FROM {factor_source}
+              WHERE session BETWEEN DATE '{label_manifest.request.start.isoformat()}'
+                                AND DATE '{label_manifest.request.end.isoformat()}'
             ), label_keys AS (
               SELECT signal_session AS session, instrument_id FROM {label_source}
             )
@@ -99,6 +102,12 @@ def audit(
         ).fetchone()[0]
         if key_mismatch:
             failures.append("label keys differ from source factor signal keys")
+        horizon_match = re.fullmatch(r"next-open-to-(\d+)d-close-total-return", label_manifest.request.label_id)
+        if horizon_match is None:
+            failures.append("label ID does not declare its holding period")
+            exit_offset = 6
+        else:
+            exit_offset = int(horizon_match.group(1)) + 1
         alignment_errors = connection.execute(
             f"""WITH calendar AS (
               SELECT cal_date, row_number() OVER (ORDER BY cal_date) AS n
@@ -108,10 +117,10 @@ def audit(
             JOIN calendar signal ON signal.cal_date=l.signal_session
             LEFT JOIN calendar entry ON entry.cal_date=l.entry_session
             LEFT JOIN calendar exit ON exit.cal_date=l.exit_session
-            WHERE l.is_valid AND (entry.n-signal.n<>1 OR exit.n-signal.n<>6)"""
+            WHERE l.is_valid AND (entry.n-signal.n<>1 OR exit.n-signal.n<>{exit_offset})"""
         ).fetchone()[0]
         if alignment_errors:
-            failures.append("valid labels violate fixed T+1/T+6 session alignment")
+            failures.append(f"valid labels violate fixed T+1/T+{exit_offset} session alignment")
         return_errors = connection.execute(
             f"""SELECT count(*) FROM {label_source}
             WHERE is_valid AND abs(value-(exit_adjusted_price/entry_adjusted_price-1))>1e-12"""

@@ -12,6 +12,8 @@
     "redundancy",
     "audit_walk_forward",
     "audit_redundancy",
+    "execution",
+    "audit_execution",
     "factor_explorer",
     "audit_factor_explorer"
   ],
@@ -80,6 +82,10 @@
         "focus_hypothesis": "RETURN_VOLATILITY"
       }
     }
+  },
+  "execution": {
+    "window_start": "2020-01-02",
+    "window_end": "2025-12-31"
   },
   "factor_explorer": {
     "report_name": "M4-CURRENT-FACTOR-EXPLORER-v1",

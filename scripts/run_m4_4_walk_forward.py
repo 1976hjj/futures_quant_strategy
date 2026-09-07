@@ -589,12 +589,23 @@ def publish(
     engine_version: str = ENGINE_VERSION,
 ) -> dict[str, Any]:
     selected_folds = folds or _folds()
+    horizons = {fold.label_horizon_sessions for fold in selected_folds}
+    if len(horizons) != 1:
+        raise ValueError("all walk-forward folds must use one holding period")
     selected_window = window or DateRange(start=date(2020, 1, 2), end=date(2025, 12, 31))
     references, loaded = _load_factor_inputs(factor_store, (raw_release_id, *processed_release_ids))
     raw_manifest, raw_path = loaded["RAW"]
     if not isinstance(raw_manifest, FactorReleaseManifest):
         raise ValueError("RAW input must be a FactorReleaseManifest")
-    label_manifest, label_path, label_cache = _publish_labels(database, evidence_store, raw_manifest, raw_path)
+    label_manifest, label_path, label_cache = _publish_labels(
+        database,
+        evidence_store,
+        raw_manifest,
+        raw_path,
+        horizons.pop(),
+        selected_window.start,
+        selected_window.end,
+    )
     request = _request(
         references,
         label_manifest,

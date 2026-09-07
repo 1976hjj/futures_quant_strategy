@@ -1,6 +1,6 @@
 # Factor Evidence Explorer 前端设计
 
-状态：M4.7 MVP 已实现 React 首版；当前展示 M4.1～M4.5，M4.6/M6 面板等待对应资产发布。
+状态：M4.7 MVP 已实现 React 首版；当前展示 M4.1～M4.6，M6 面板等待对应资产发布。
 
 ## 1. 产品定位
 
@@ -87,7 +87,7 @@ reports/factor_explorer/<report_id>/
 - 13 个因子、39 条 factor×variant 路径、25 条 canonical 路径、10 个 cluster；
 - 117 条 fold 记录、468 条 Regime 记录、741 对关系、25 条增量证据；
 - 14 条 duplicate 路径不复制增量结论，只显示对应 canonical 路径的引用；
-- M4.6 Execution 与 M6 Model Contribution 全部为 `NOT_AVAILABLE`；
+- M4.6 Execution 对 13 条 RAW 因子路径可用，其他变体不借用 RAW 证据；M6 Model Contribution 保持 `NOT_AVAILABLE`；
 - 独立静态审计为 `PASS_WITH_FINDINGS`，详见 `docs/audits/m4_7_factor_explorer_verification.md`。
 
 ## 3. 全局上下文栏
@@ -190,7 +190,7 @@ Cluster 代表项只用于导航和默认计算路径，不使用奖杯、冠军
 +--------------------------------------------------------------------------------+
 | Alpha Research OS / Factor Explorer | Context: ALL-A · 5D · 2020-2025 EXPOSED |
 +--------------------------------------------------------------------------------+
-| 39 paths | 25 canonical | 10 clusters | 0 integrity blockers | M4.6 pending    |
+| 39 paths | 25 canonical | 10 clusters | 0 integrity blockers | 13 execution-ready RAW paths |
 +--------------------------------------------------------------------------------+
 | Search [________]  Family [All] Variant [All] Route [All] Cluster [All]         |
 +--------------------------------------------------------------------------------+
@@ -263,7 +263,7 @@ MVP 从现有视图生成标准化展示快照：
 - 任意符合契约的新 factor release 无需修改页面代码即可显示；
 - 首页、详情、最多 6 因子对比和 cluster 页面可离线使用；
 - 所有展示数值可以追溯到 DuckDB 字段和不可变 asset ID；
-- M4.6/M6 未完成的面板显示 `NOT_AVAILABLE`，不伪造空结果；
+- 未具有对应 M4.6 变体证据和未完成的 M6 面板显示 `NOT_AVAILABLE`，不伪造空结果；
 - 描述性、回顾诊断、已暴露 pseudo-OOS 和真实 OOS 视觉上明确区分；
 - 单因子弱、方向证伪和冗余不会显示成全局淘汰；
 - 导出的 FeatureSet 只是草案，并包含报告 ID 和暴露上下文；

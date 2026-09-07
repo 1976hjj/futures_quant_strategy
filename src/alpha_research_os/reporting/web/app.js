@@ -140,6 +140,12 @@
     const robustness = item.robustness;
     const incremental = item.incremental;
     const canonicalIncremental = item.canonical_incremental;
+    const executionRows = item.execution.status === "AVAILABLE"
+      ? item.execution.capital_scenarios.map(row => `<tr><td>${formatNumber(row.capital_cny, 0)}</td><td>${formatPercent(row.fill_rate)}</td><td>${formatNumber(row.average_cost_bps)}</td><td>${formatNumber(row.average_daily_net_return)}</td></tr>`).join("")
+      : "";
+    const executionPanel = item.execution.status === "AVAILABLE"
+      ? `<table class="mini-table"><thead><tr><th>Capital CNY</th><th>Fill rate</th><th>Cost bps</th><th>Daily net</th></tr></thead><tbody>${executionRows}</tbody></table>`
+      : `<p class="na">NOT_AVAILABLE · ${escapeHtml(item.execution.reason)}</p>`;
     const basicWindow = item.basic_evidence?.window;
     const basicLabel = basicWindow ? `基础 RankIC (${basicWindow.start} → ${basicWindow.end})` : "基础 RankIC";
     $("#detail-content").innerHTML = `
@@ -156,7 +162,7 @@
       <section class="panel detail-section"><h3>Walk-Forward</h3><table class="mini-table"><thead><tr><th>Fold</th><th>Train</th><th>Validation</th><th>Test</th><th>结果</th></tr></thead><tbody>${foldRows}</tbody></table></section>
       <section class="panel detail-section"><h3>Regime</h3><table class="mini-table"><thead><tr><th>Fold</th><th>维度</th><th>状态</th><th>样本</th><th>RankIC</th></tr></thead><tbody>${regimeRows}</tbody></table></section>
       <section class="panel detail-section"><h3>冗余与增量</h3><dl><dt>Entity</dt><dd>${escapeHtml(item.entity_id)}</dd><dt>Cluster</dt><dd>${escapeHtml(item.cluster?.cluster_id ?? "—")}</dd><dt>Canonical</dt><dd>${item.deduplication?.is_canonical ? "YES" : escapeHtml(item.deduplication?.canonical_entity_id ?? "NO")}</dd><dt>本路径条件 RankIC</dt><dd>${formatNumber(incremental?.mean_conditional_rank_ic)}</dd><dt>Canonical 正交 RankIC</dt><dd>${formatNumber(canonicalIncremental?.mean_orthogonal_rank_ic_directed)}</dd><dt>样本分类</dt><dd>${escapeHtml(incremental?.sample_classification ?? canonicalIncremental?.sample_classification ?? data.report.sample_classification)}</dd></dl></section>
-      <section class="panel detail-section"><h3>可执行性</h3><p class="na">NOT_AVAILABLE · M4.6 尚未发布。缺失不表示收益或成本为零。</p></section>
+      <section class="panel detail-section"><h3>可执行性</h3>${executionPanel}</section>
       <section class="panel detail-section"><h3>模型贡献</h3><p class="na">NOT_AVAILABLE · M6 尚未发布。单因子结果不会替代模型级 Walk-Forward。</p></section>
       <section class="panel detail-section"><h3>Evidence lineage</h3><dl><dt>Walk-Forward</dt><dd>${escapeHtml(data.report.walk_forward_id)}</dd><dt>Redundancy</dt><dd>${escapeHtml(data.report.redundancy_id)}</dd><dt>Robustness</dt><dd>${escapeHtml(data.report.robustness_id ?? "NOT_AVAILABLE")}</dd></dl></section>`;
     $("#detail-drawer").classList.add("open"); $("#backdrop").classList.add("open"); $("#detail-drawer").setAttribute("aria-hidden", "false");

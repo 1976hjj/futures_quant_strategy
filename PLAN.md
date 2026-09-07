@@ -1,6 +1,6 @@
 # Alpha Research OS 实施计划
 
-状态：Active implementation — M2-E extended-data backfill + M4.5 redundancy/incremental evidence completed
+状态：Active implementation — M2-E priority core + M4.6 execution evidence completed; extended ownership backfill paused
 项目范围：A 股、日频、横截面因子研究  
 最后更新：2026-09-04
 
@@ -201,7 +201,7 @@ M4.5 已完成因子值/日度 IC 相关、变体去重、平均连接层次聚�
 
 M4.1～M4.5 与 M4.7 Explorer 已统一接入配置化批处理入口 `scripts/run_m4_pipeline.py`。因子集合从不可变 release 自动发现，窗口、fold、检验 family、processed variants、方向覆盖和重点证伪均由机器校验的 JSON 配置声明；审计不再写死因子或日期。当前配置见 `config/m4_pipeline_current.json`，操作与扩展边界见 `docs/m4_pipeline.md`。同一请求优先校验并复用内容寻址缓存，不重新生成已有大型资产。
 
-M4.6 在 M2-E 正式发布后补齐单因子和简单组合的可执行证据：涨跌停、停牌、退市收益、T+1、费用、滑点、换手、冲击和容量。该执行层必须接收通用 prediction/score 输入，使未来 LightGBM 分数与单因子分数共享完全相同的订单和成交语义。
+M4.6 已完成优先核心发布与可执行证据：M2-E `stk_limit`、历史申万分类/成员以独立核心投影发布，ownership 扩展回填暂停且不会改变核心 vintage。执行层接收通用 prediction/score 输入，已对 13 个 RAW 单因子和 1 个等权排名组合生成 2020～2025 年 T+1、涨跌停、停牌、退市、费用、滑点、换手、冲击和 100 万/1,000 万/1 亿元容量证据。独立审计 `PASS_WITH_FINDINGS`；退市终止收益不可用的 4,216 个资金场景订单被显式拒绝。当前窗口已暴露，结果保持 `EXECUTION_DIAGNOSTIC_EXPOSED_SAMPLE`，不得据此晋级 Core Pool。详见 `docs/m4_6_execution_evidence.md`。
 
 M4.7 首版已完成：Factor Evidence Card 的只读展示快照、内容寻址静态报告和 `frontEnd/` React + TypeScript 应用已落地。首页支持全库筛选与分页，详情抽屉展示证据血缘，多因子页支持最多 6 条路径并排比较和导出未注册 FeatureSet 草案，Cluster 页展示去重与代表关系；M4.6/M6 指标明确显示 `NOT_AVAILABLE`。React 应用通过同步脚本读取流水线最新快照，不直连或回写 DuckDB。当前报告汇总 13 个因子、39 条因子×变体路径、25 条 canonical 路径和 10 个信息簇，报告 ID 为 `sha256:e86eab258a0e905f0e5e4296fe8ba943ef4dc8790a4898a4d1e514cb0ab9b17f`，静态独立审计为 `PASS_WITH_FINDINGS`。展示层不重新计算统计、不自动晋级、也不因单因子结果永久淘汰模型特征；当前 2020～2025 样本仍是已暴露研究样本。详细设计见 `docs/factor_evidence_explorer_ui.md`，验收见 `docs/audits/m4_7_factor_explorer_verification.md`。
 

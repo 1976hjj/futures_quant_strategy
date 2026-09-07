@@ -107,27 +107,34 @@ class ForwardReturnLabel(FrozenSpec):
         return self
 
 
-def default_forward_5d_label_spec() -> LabelSpec:
-    """T close signal; T+1 open entry; T+6 close exit; five-session horizon."""
+def forward_return_label_spec(horizon_sessions: int) -> LabelSpec:
+    """T close signal; T+1 open entry; fixed close exit after the requested holding period."""
 
+    if horizon_sessions not in {5, 10, 20, 30}:
+        raise ValueError("supported holding periods are 5, 10, 20, and 30 sessions")
+    exit_offset = horizon_sessions + 1
     return LabelSpec(
-        label_id="next-open-to-5d-close-total-return",
+        label_id=f"next-open-to-{horizon_sessions}d-close-total-return",
         label_version="1.0.0-provisional",
         signal_cutoff=SignalCutoff.POST_CLOSE,
         expression=LabelExpression(
-            formula="adjusted_close[t+6] / adjusted_open[t+1] - 1",
+            formula=f"adjusted_close[t+{exit_offset}] / adjusted_open[t+1] - 1",
             dependencies=(
                 TemporalDependency(field="open", data_domain=DataDomain.MARKET, relative_session=1),
                 TemporalDependency(field="adj_factor", data_domain=DataDomain.CORPORATE_ACTION, relative_session=1),
-                TemporalDependency(field="close", data_domain=DataDomain.MARKET, relative_session=6),
-                TemporalDependency(field="adj_factor", data_domain=DataDomain.CORPORATE_ACTION, relative_session=6),
+                TemporalDependency(field="close", data_domain=DataDomain.MARKET, relative_session=exit_offset),
+                TemporalDependency(
+                    field="adj_factor", data_domain=DataDomain.CORPORATE_ACTION, relative_session=exit_offset
+                ),
                 TemporalDependency(field="is_suspended", data_domain=DataDomain.SECURITY_STATUS, relative_session=1),
-                TemporalDependency(field="is_suspended", data_domain=DataDomain.SECURITY_STATUS, relative_session=6),
+                TemporalDependency(
+                    field="is_suspended", data_domain=DataDomain.SECURITY_STATUS, relative_session=exit_offset
+                ),
             ),
         ),
         entry=PricePoint(event=MarketEvent.OPEN, session_offset=1, price_field="open"),
-        exit=PricePoint(event=MarketEvent.CLOSE, session_offset=6, price_field="close"),
-        horizon_sessions=5,
+        exit=PricePoint(event=MarketEvent.CLOSE, session_offset=exit_offset, price_field="close"),
+        horizon_sessions=horizon_sessions,
         overlapping=True,
         suspension_handling="invalidate_if_fixed_entry_or_exit_session_is_suspended",
         untradable_handling="bar_and_suspension_only_until_m2e_stk_limit_release",
@@ -136,6 +143,12 @@ def default_forward_5d_label_spec() -> LabelSpec:
         benchmark_rule="none_raw_total_return",
         tail_truncation_rule="none_raw_label",
     )
+
+
+def default_forward_5d_label_spec() -> LabelSpec:
+    """Backward-compatible default five-session label."""
+
+    return forward_return_label_spec(5)
 
 
 class ForwardReturnLabelBuilder:
