@@ -28,6 +28,8 @@ for import_root in (PROJECT_ROOT, SRC_ROOT):
     if str(import_root) not in sys.path:
         sys.path.insert(0, str(import_root))
 
+from alpha_research_os.factors.alpha158 import alpha158_catalog  # noqa: E402
+from alpha_research_os.factors.jqdata import jqdata_catalog  # noqa: E402
 from alpha_research_os.kernel.canonical import canonical_json_bytes, content_hash  # noqa: E402
 from alpha_research_os.orchestration import M4PipelineConfig  # noqa: E402
 from alpha_research_os.reporting import (  # noqa: E402
@@ -36,7 +38,6 @@ from alpha_research_os.reporting import (  # noqa: E402
     query_factor_assets,
     query_factor_catalog,
 )
-from alpha_research_os.factors.alpha158 import alpha158_catalog  # noqa: E402
 
 STAGE_LABELS = {
     "m4_1": "基础收益关系",
@@ -137,10 +138,10 @@ class FactorComputeRequest(BaseModel):
     def valid_scope(self) -> FactorComputeRequest:
         if self.end < self.start:
             raise ValueError("end must not precede start")
-        catalog = {item.factor_id: item for item in alpha158_catalog()}
+        catalog = {item.factor_id: item for item in (*alpha158_catalog(), *jqdata_catalog())}
         item = catalog.get(self.factor_id)
         if item is None:
-            raise ValueError("only an Alpha158 catalog factor can be calculated here")
+            raise ValueError("only an Alpha158 or JQData catalog factor can be calculated here")
         if item.factor_version != self.factor_version:
             raise ValueError("factor version does not match the catalog")
         return self
@@ -467,6 +468,16 @@ class FactorJobManager:
 
     def start(self, payload: dict[str, Any]) -> dict[str, Any]:
         request = FactorComputeRequest.model_validate(payload)
+        jqdata_account_factors = {
+            "jqdata-predicted-earnings-to-price-ratio",
+            "jqdata-resvol",
+        }
+        if request.factor_id in jqdata_account_factors and (
+            not os.environ.get("JQDATA_USERNAME", "").strip() or not os.environ.get("JQDATA_PASSWORD", "")
+        ):
+            raise ValueError(
+                "JQData 尚未配置：请在启动后端前设置 JQDATA_USERNAME 和 JQDATA_PASSWORD 环境变量"
+            )
         database = self.project_root / "data" / "warehouse" / "alpha_research.duckdb"
         with duckdb.connect(str(database), read_only=True) as connection:
             lower, upper = connection.execute(
@@ -488,7 +499,11 @@ class FactorJobManager:
             self.process = subprocess.Popen(
                 [
                     sys.executable,
-                    "scripts/publish_alpha158_factor.py",
+                    (
+                        "scripts/publish_jqdata_factor.py"
+                        if request.factor_id.startswith("jqdata-")
+                        else "scripts/publish_alpha158_factor.py"
+                    ),
                     "--factor-id", request.factor_id,
                     "--start", request.start.isoformat(),
                     "--end", request.end.isoformat(),
@@ -689,7 +704,7 @@ def make_handler(
                 status = first("status", "ALL").upper()
                 sort_by = first("sortBy", "category")
                 sort_order = first("sortOrder", "asc").lower()
-                if source not in {"ALL", "CURRENT", "ALPHA158"}:
+                if source not in {"ALL", "CURRENT", "ALPHA158", "JQDATA"}:
                     raise ValueError("unknown factor source")
                 if status not in {"ALL", "M4_COMPLETE", "CALCULATED", "NOT_CALCULATED"}:
                     raise ValueError("unknown calculation status")

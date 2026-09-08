@@ -22,6 +22,9 @@ data-free = [
 data-tushare = [
   "tushare>=1.4,<2",
 ]
+data-jqdata = [
+  "jqdatasdk>=1.9,<2",
+]
 dev = [
   "hypothesis>=6.125",
   "pytest>=8.3",

@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-from collections import Counter
 import json
 import os
+from collections import Counter
 
 import pytest
 
 from alpha_research_os.factors.alpha158 import alpha158_catalog
 from alpha_research_os.reporting.factor_catalog_overview import (
     _latest_explorer_factors,
+    _release_index,
+    _result_for_current_release,
     build_factor_catalog_overview,
     query_factor_catalog,
 )
@@ -29,18 +31,19 @@ def test_alpha158_catalog_has_exact_official_shape() -> None:
     assert by_name["VSTD60"].formula == "Std($volume, 60)/($volume+1e-12)"
 
 
-def test_empty_project_shows_13_native_and_158_alpha_items_as_not_calculated(tmp_path) -> None:
+def test_empty_project_shows_native_alpha158_and_jqdata_items_as_not_calculated(tmp_path) -> None:
     items = build_factor_catalog_overview(tmp_path)
     response = query_factor_catalog(items, page=1, page_size=24)
 
-    assert len(items) == 171
+    assert len(items) == 177
     assert response["counts"] == {
-        "total": 171,
+        "total": 177,
         "calculated": 0,
         "m4_completed": 0,
-        "not_calculated": 171,
+        "not_calculated": 177,
         "current": 13,
         "alpha158": 158,
+        "jqdata": 6,
     }
     assert len(response["items"]) == 24
     assert response["totalPages"] == 8
@@ -80,6 +83,50 @@ def test_explorer_index_keeps_latest_result_for_each_factor(tmp_path) -> None:
         ("alpha158-cntp10", "qlib-main-catalog-1"),
     }
     assert indexed[("alpha158-sump10", "qlib-main-catalog-1")]["basic_evidence"]["mean_rank_ic"] == 0.02
+
+
+def test_latest_factor_release_uses_calculation_time_not_window_end(tmp_path) -> None:
+    releases_root = tmp_path / "data" / "factor_store" / "releases"
+
+    def publish(release_id: str, start: str, end: str, created_at: str) -> None:
+        manifest = releases_root / release_id / "manifest.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(
+            json.dumps(
+                {
+                    "release_id": release_id,
+                    "created_at": created_at,
+                    "request": {
+                        "start": start,
+                        "end": end,
+                        "factors": [
+                            {
+                                "factor_id": "alpha158-sump10",
+                                "factor_version": "qlib-main-catalog-1",
+                            }
+                        ],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    publish("later-window", "2020-01-02", "2024-12-31", "2026-09-01T12:00:00+08:00")
+    publish("newer-calculation", "2016-01-04", "2020-12-31", "2026-09-08T12:00:00+08:00")
+
+    indexed = _release_index(tmp_path)
+
+    assert indexed[("alpha158-sump10", "qlib-main-catalog-1")][0]["release_id"] == "newer-calculation"
+
+
+def test_old_m4_result_does_not_mark_recalculated_release_complete() -> None:
+    published = [{"release_id": "new-current-release"}]
+    old_result = {"quality": {"release_id": "old-release"}}
+
+    assert _result_for_current_release(published, old_result) is None
+    assert _result_for_current_release(
+        published, {"quality": {"release_id": "new-current-release"}}
+    ) is not None
 
 
 def test_catalog_filter_search_and_pagination_are_deterministic(tmp_path) -> None:

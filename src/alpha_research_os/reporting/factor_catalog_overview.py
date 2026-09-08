@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from alpha_research_os.factors.alpha158 import FactorCategory, alpha158_catalog
+from alpha_research_os.factors.jqdata import jqdata_catalog
 from alpha_research_os.factors.library import m4_2_factor_entries
 
 CATEGORY_ORDER: tuple[FactorCategory, ...] = ("动量", "波动", "流动性", "质量", "估值", "风格", "量价", "形态")
@@ -45,13 +46,17 @@ def _release_index(project_root: Path) -> dict[tuple[str, str], list[dict[str, A
                     "release_id": payload["release_id"],
                     "start": request["start"],
                     "end": request["end"],
+                    "created_at": payload.get("created_at", ""),
                     "row_count": factor.get("row_count"),
                     "present_count": factor.get("present_count"),
                     "coverage": factor.get("coverage"),
                 }
             )
     for releases in index.values():
-        releases.sort(key=lambda item: (item["end"], item["release_id"]), reverse=True)
+        # "Current" means the most recently calculated release, not the release
+        # whose data window happens to end latest. This lets a later calculation
+        # of an older period replace the current UI selection for the same factor.
+        releases.sort(key=lambda item: (item["created_at"], item["release_id"]), reverse=True)
     return index
 
 
@@ -122,6 +127,19 @@ def _result_summary(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _result_for_current_release(
+    published: list[dict[str, Any]], result: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    if not published or result is None:
+        return result
+    evidence_release_id = (result.get("quality") or {}).get("release_id") or (
+        result.get("robustness") or {}
+    ).get("factor_release_id")
+    if evidence_release_id and evidence_release_id != published[0]["release_id"]:
+        return None
+    return result
+
+
 def _status(published: list[dict[str, Any]], result: dict[str, Any] | None) -> str:
     return "M4_COMPLETE" if result else "CALCULATED" if published else "NOT_CALCULATED"
 
@@ -155,7 +173,8 @@ def build_factor_catalog_overview(project_root: Path) -> list[dict[str, Any]]:
         spec = cataloged.spec
         chinese_name, category, description = CURRENT_LOCALIZATION[spec.factor_id]
         key = (spec.factor_id, spec.factor_version)
-        published, result = releases.get(key, []), evidence.get(key)
+        published = releases.get(key, [])
+        result = _result_for_current_release(published, evidence.get(key))
         items.append(
             {
                 "factor_id": spec.factor_id,
@@ -175,7 +194,8 @@ def build_factor_catalog_overview(project_root: Path) -> list[dict[str, Any]]:
         )
     for factor in alpha158_catalog():
         key = (factor.factor_id, factor.factor_version)
-        published, result = releases.get(key, []), evidence.get(key)
+        published = releases.get(key, [])
+        result = _result_for_current_release(published, evidence.get(key))
         items.append(
             {
                 "factor_id": factor.factor_id,
@@ -194,6 +214,29 @@ def build_factor_catalog_overview(project_root: Path) -> list[dict[str, Any]]:
                 **_dynamic_fields(published, result, alpha158=True),
             }
         )
+    for factor in jqdata_catalog():
+        key = (factor.factor_id, factor.factor_version)
+        published = releases.get(key, [])
+        result = _result_for_current_release(published, evidence.get(key))
+        items.append(
+            {
+                "factor_id": factor.factor_id,
+                "external_name": factor.external_name,
+                "factor_version": factor.factor_version,
+                "chinese_name": factor.chinese_name,
+                "english_name": f"JQData {factor.external_name}",
+                "category": factor.category,
+                "family": factor.family,
+                "description": factor.description,
+                "formula": factor.formula,
+                "required_fields": list(factor.required_fields),
+                "window_sessions": None,
+                "expected_direction": factor.expected_direction,
+                "source_collection": "JQDATA",
+                "source_label": "JoinQuant JQData 因子库",
+                **_dynamic_fields(published, result, alpha158=True),
+            }
+        )
     return items
 
 
@@ -204,7 +247,7 @@ def query_factor_catalog(
     page_size: int = 36,
     query: str = "",
     category: str = "全部",
-    source: Literal["ALL", "CURRENT", "ALPHA158"] = "ALL",
+    source: Literal["ALL", "CURRENT", "ALPHA158", "JQDATA"] = "ALL",
     status: Literal["ALL", "M4_COMPLETE", "CALCULATED", "NOT_CALCULATED"] = "ALL",
     sort_by: Literal["category", "name", "status", "factor_id"] = "category",
     sort_order: Literal["asc", "desc"] = "asc",
@@ -246,6 +289,7 @@ def query_factor_catalog(
         "not_calculated": sum(not item["calculated"] for item in items),
         "current": sum(item["source_collection"] == "CURRENT" for item in items),
         "alpha158": sum(item["source_collection"] == "ALPHA158" for item in items),
+        "jqdata": sum(item["source_collection"] == "JQDATA" for item in items),
     }
     categories = {"全部": len(facet_items)} | {
         name: sum(item["category"] == name for item in facet_items) for name in CATEGORY_ORDER
