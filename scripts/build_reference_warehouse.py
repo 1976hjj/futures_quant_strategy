@@ -340,7 +340,12 @@ def _build_catalog(database: Path, parquet_root: Path, checkpoint_hash: str, cou
                     n.is_st_name,
                     row_number() OVER (
                         PARTITION BY l.trade_date, l.ts_code
-                        ORDER BY n.start_date DESC NULLS LAST, n.ann_date DESC NULLS LAST
+                        ORDER BY n.start_date DESC NULLS LAST,
+                          n.ann_date DESC NULLS LAST,
+                          n.source_snapshot_id DESC NULLS LAST,
+                          n.source_row_number DESC NULLS LAST,
+                          n.source_payload_artifact_id DESC NULLS LAST,
+                          n.name DESC NULLS LAST
                     ) AS name_rank
                 FROM listed l
                 LEFT JOIN research.security_name_history n

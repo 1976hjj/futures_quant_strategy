@@ -23,7 +23,7 @@ WINDOWS = (5, 10, 20, 30, 60)
 class Alpha158CatalogItem(FrozenSpec):
     factor_id: str
     external_name: str
-    factor_version: str = "qlib-main-catalog-1"
+    factor_version: str = "qlib-main-catalog-2"
     chinese_name: str
     category: FactorCategory
     family: str

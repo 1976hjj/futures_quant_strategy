@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import uuid
 from datetime import date, datetime
 from pathlib import Path
@@ -212,40 +213,36 @@ def _materialize_yearly(
     request: ProcessedFactorAssetRequest,
     target: Path,
 ) -> None:
-    staging = target.parent / "yearly_staging"
+    # A shared staging directory makes a failed or interrupted run poison the
+    # next run: an old .tmp.parquet is not among this run's partitions, so the
+    # final rmdir() fails even after materialisation and combination succeeded.
+    # Keep each attempt isolated and make cleanup best-effort.  A stranded
+    # directory can then never block a subsequent computation.
+    staging = target.parent / f".yearly_staging.{uuid.uuid4().hex}"
     staging.mkdir(parents=True, exist_ok=True)
-    partitions: list[Path] = []
-    for year in range(request.start.year, request.end.year + 1):
-        lower = max(request.start, date(year, 1, 1))
-        upper = min(request.end, date(year, 12, 31))
-        partition = staging / f"year={year}.parquet"
-        partitions.append(partition)
-        if partition.exists():
-            with duckdb.connect() as connection:
-                identity, first_session, last_session = connection.execute(
-                    f"SELECT min(release_id),min(session),max(session) FROM read_parquet('{_sql_path(partition)}')"
-                ).fetchone()
-            if identity == request.computation_key and lower <= first_session <= last_session <= upper:
-                print(f"variant={request.variant} year={year} cache_hit", flush=True)
-                continue
-            raise ValueError(f"invalid processed yearly staging partition: {partition}")
-        temporary = partition.with_name(f".{partition.stem}.{uuid.uuid4().hex}.tmp.parquet")
-        print(f"variant={request.variant} year={year} materializing", flush=True)
-        with duckdb.connect(str(database), read_only=True) as connection:
+    try:
+        partitions: list[Path] = []
+        for year in range(request.start.year, request.end.year + 1):
+            lower = max(request.start, date(year, 1, 1))
+            upper = min(request.end, date(year, 12, 31))
+            partition = staging / f"year={year}.parquet"
+            partitions.append(partition)
+            temporary = partition.with_name(f".{partition.stem}.{uuid.uuid4().hex}.tmp.parquet")
+            print(f"variant={request.variant} year={year} materializing", flush=True)
+            with duckdb.connect(str(database), read_only=True) as connection:
+                _configure_bounded_connection(connection, store / "duckdb_tmp")
+                connection.execute(_materialization_sql(parent, temporary, request, lower, upper))
+            os.replace(temporary, partition)
+        parquet_list = ",".join(_sql_string(_sql_path(path)) for path in partitions)
+        print(f"variant={request.variant} combining yearly partitions", flush=True)
+        with duckdb.connect() as connection:
             _configure_bounded_connection(connection, store / "duckdb_tmp")
-            connection.execute(_materialization_sql(parent, temporary, request, lower, upper))
-        os.replace(temporary, partition)
-    parquet_list = ",".join(_sql_string(_sql_path(path)) for path in partitions)
-    print(f"variant={request.variant} combining yearly partitions", flush=True)
-    with duckdb.connect() as connection:
-        _configure_bounded_connection(connection, store / "duckdb_tmp")
-        connection.execute(
-            f"""COPY (SELECT * FROM read_parquet([{parquet_list}])) TO '{_sql_path(target)}'
-            (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 6, ROW_GROUP_SIZE 122880)"""
-        )
-    for partition in partitions:
-        partition.unlink()
-    staging.rmdir()
+            connection.execute(
+                f"""COPY (SELECT * FROM read_parquet([{parquet_list}])) TO '{_sql_path(target)}'
+                (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 6, ROW_GROUP_SIZE 122880)"""
+            )
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def _quality(path: Path, factor_count: int, minimum: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -414,40 +411,43 @@ def publish(database: Path, store: Path, parent_release_id: str, variant: str) -
         return {"cache_hit": True, "release_id": manifest.release_id, "manifest": str(manifest_path.resolve())}
     release_dir.mkdir(parents=True, exist_ok=True)
     temporary = release_dir / f".processed_factor_values.{uuid.uuid4().hex}.tmp.parquet"
-    if (request.end - request.start).days > 370:
-        _materialize_yearly(database, store, parent_parquet, request, temporary)
-    else:
-        with duckdb.connect(str(database), read_only=True) as connection:
-            _configure_bounded_connection(connection, store / "duckdb_tmp")
-            connection.execute(_materialization_sql(parent_parquet, temporary, request))
-    quality, details = _quality(temporary, parent.factor_count, request.preprocessing.minimum_cross_section)
-    os.replace(temporary, parquet)
-    _atomic_write(quality_path, canonical_json_bytes(quality))
-    manifest = ProcessedFactorReleaseManifest(
-        release_id=request.computation_key,
-        request=request,
-        created_at=datetime.now().astimezone(),
-        parquet_relative_path=parquet.relative_to(store).as_posix(),
-        parquet_hash=_sha256_file(parquet),
-        row_count=quality["row_count"],
-        present_count=quality["present_count"],
-        session_count=quality["session_count"],
-        instrument_count=quality["instrument_count"],
-        factor_count=quality["factor_count"],
-        quality_status="PASS",
-        quality_summary_hash=_sha256_file(quality_path),
-    )
-    _atomic_write(manifest_path, canonical_json_bytes(manifest))
-    _register(database, store, manifest, details)
-    return {
-        "cache_hit": False,
-        "release_id": manifest.release_id,
-        "parent_release_id": parent_release_id,
-        "variant": variant,
-        "row_count": manifest.row_count,
-        "present_count": manifest.present_count,
-        "manifest": str(manifest_path.resolve()),
-    }
+    try:
+        if (request.end - request.start).days > 370:
+            _materialize_yearly(database, store, parent_parquet, request, temporary)
+        else:
+            with duckdb.connect(str(database), read_only=True) as connection:
+                _configure_bounded_connection(connection, store / "duckdb_tmp")
+                connection.execute(_materialization_sql(parent_parquet, temporary, request))
+        quality, details = _quality(temporary, parent.factor_count, request.preprocessing.minimum_cross_section)
+        os.replace(temporary, parquet)
+        _atomic_write(quality_path, canonical_json_bytes(quality))
+        manifest = ProcessedFactorReleaseManifest(
+            release_id=request.computation_key,
+            request=request,
+            created_at=datetime.now().astimezone(),
+            parquet_relative_path=parquet.relative_to(store).as_posix(),
+            parquet_hash=_sha256_file(parquet),
+            row_count=quality["row_count"],
+            present_count=quality["present_count"],
+            session_count=quality["session_count"],
+            instrument_count=quality["instrument_count"],
+            factor_count=quality["factor_count"],
+            quality_status="PASS",
+            quality_summary_hash=_sha256_file(quality_path),
+        )
+        _atomic_write(manifest_path, canonical_json_bytes(manifest))
+        _register(database, store, manifest, details)
+        return {
+            "cache_hit": False,
+            "release_id": manifest.release_id,
+            "parent_release_id": parent_release_id,
+            "variant": variant,
+            "row_count": manifest.row_count,
+            "present_count": manifest.present_count,
+            "manifest": str(manifest_path.resolve()),
+        }
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def main() -> int:

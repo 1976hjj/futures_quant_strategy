@@ -12,7 +12,13 @@ from alpha_research_os.factors.jqdata import jqdata_catalog
 from alpha_research_os.factors.library import m4_2_factor_entries
 
 CATEGORY_ORDER: tuple[FactorCategory, ...] = ("动量", "波动", "流动性", "质量", "估值", "风格", "量价", "形态")
-STATUS_ORDER = {"M4_COMPLETE": 0, "CALCULATED": 1, "NOT_CALCULATED": 2}
+STATUS_ORDER = {
+    "M4_COMPLETE": 0,
+    "CALCULATED": 1,
+    "CALCULATED_VERIFYING": 2,
+    "ACCURACY_FAILED": 3,
+    "NOT_CALCULATED": 4,
+}
 
 CURRENT_LOCALIZATION: dict[str, tuple[str, FactorCategory, str]] = {
     "price-momentum-20": ("20日价格动量", "动量", "观察过去20个交易日的复权价格趋势是否延续。"),
@@ -40,6 +46,14 @@ def _release_index(project_root: Path) -> dict[tuple[str, str], list[dict[str, A
     for path in sorted((project_root / "data" / "factor_store" / "releases").glob("*/manifest.json")):
         payload = json.loads(path.read_bytes())
         request = payload["request"]
+        verification_path = path.parent / "accuracy_verification.json"
+        quality_path = path.parent / "quality_summary.json"
+        if verification_path.exists():
+            verification = json.loads(verification_path.read_bytes())
+        elif quality_path.exists():
+            verification = json.loads(quality_path.read_bytes()).get("accuracy_gate") or {"status": "NOT_REQUIRED"}
+        else:
+            verification = {"status": "NOT_REQUIRED"}
         for factor in request["factors"]:
             index.setdefault((factor["factor_id"], factor["factor_version"]), []).append(
                 {
@@ -50,6 +64,8 @@ def _release_index(project_root: Path) -> dict[tuple[str, str], list[dict[str, A
                     "row_count": factor.get("row_count"),
                     "present_count": factor.get("present_count"),
                     "coverage": factor.get("coverage"),
+                    "accuracy_status": verification.get("status", "NOT_REQUIRED"),
+                    "accuracy_error": verification.get("error"),
                 }
             )
     for releases in index.values():
@@ -141,7 +157,14 @@ def _result_for_current_release(
 
 
 def _status(published: list[dict[str, Any]], result: dict[str, Any] | None) -> str:
-    return "M4_COMPLETE" if result else "CALCULATED" if published else "NOT_CALCULATED"
+    if not published:
+        return "NOT_CALCULATED"
+    accuracy = published[0].get("accuracy_status")
+    if accuracy == "FAIL":
+        return "ACCURACY_FAILED"
+    if accuracy == "PENDING":
+        return "CALCULATED_VERIFYING"
+    return "M4_COMPLETE" if result else "CALCULATED"
 
 
 def _dynamic_fields(
@@ -151,6 +174,8 @@ def _dynamic_fields(
     label = {
         "M4_COMPLETE": "M4 已完成",
         "CALCULATED": "已计算，待完整 M4",
+        "CALCULATED_VERIFYING": "已计算，准确性复核中",
+        "ACCURACY_FAILED": "准确性复核失败",
         "NOT_CALCULATED": "已接入，未计算" if alpha158 else "未计算",
     }[status]
     return {
@@ -162,6 +187,8 @@ def _dynamic_fields(
         "release_count": len(published),
         "coverage": published[0] if published else None,
         "result": _result_summary(result) if result else None,
+        "accuracy_status": published[0].get("accuracy_status") if published else None,
+        "accuracy_error": published[0].get("accuracy_error") if published else None,
     }
 
 
@@ -248,7 +275,9 @@ def query_factor_catalog(
     query: str = "",
     category: str = "全部",
     source: Literal["ALL", "CURRENT", "ALPHA158", "JQDATA"] = "ALL",
-    status: Literal["ALL", "M4_COMPLETE", "CALCULATED", "NOT_CALCULATED"] = "ALL",
+    status: Literal[
+        "ALL", "M4_COMPLETE", "CALCULATED", "CALCULATED_VERIFYING", "ACCURACY_FAILED", "NOT_CALCULATED"
+    ] = "ALL",
     sort_by: Literal["category", "name", "status", "factor_id"] = "category",
     sort_order: Literal["asc", "desc"] = "asc",
 ) -> dict[str, Any]:

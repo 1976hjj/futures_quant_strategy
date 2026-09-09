@@ -4,7 +4,7 @@ import pytest
 
 from alpha_research_os.factors.jqdata import jqdata_catalog
 from alpha_research_os.reporting.factor_catalog_overview import build_factor_catalog_overview, query_factor_catalog
-from scripts.publish_jqdata_factor import _catalog, _credentials, _jq_code
+from scripts.publish_jqdata_factor import FUNDAMENTAL_ENGINE_VERSION, _catalog, _credentials, _engine_version, _jq_code
 
 
 def test_jqdata_catalog_contains_selected_originals_and_local_replacements() -> None:
@@ -18,6 +18,10 @@ def test_jqdata_catalog_contains_selected_originals_and_local_replacements() -> 
         "resvol",
     ]
     by_name = {item.external_name: item for item in items}
+    assert by_name["cash_earnings_to_price_ratio"].factor_version == "jqdata-factorlib-2"
+    assert by_name["earnings_to_price_ratio"].factor_version == "jqdata-factorlib-2"
+    assert by_name["share_turnover_monthly"].factor_version == "jqdata-factorlib-2"
+    assert by_name["daily_standard_deviation"].factor_version == "jqdata-factorlib-2"
     assert by_name["predicted_earnings_to_price_ratio"].formula == (
         "分析师对未来一年预期盈利加权平均值 / 当前股票市值"
     )
@@ -49,6 +53,12 @@ def test_jqdata_factor_spec_preserves_direction_and_vendor_source() -> None:
     assert _catalog(high).list()[0].entry.spec.direction.value == "POSITIVE"
     assert _catalog(low).list()[0].entry.spec.direction.value == "NEGATIVE"
     assert _catalog(high).list()[0].entry.source_reference.kind.value == "DATA_VENDOR"
+
+
+def test_fundamental_local_formulas_use_the_deterministic_engine() -> None:
+    by_name = {item.external_name: item for item in jqdata_catalog()}
+    for name in ("cash_earnings_to_price_ratio", "earnings_to_price_ratio"):
+        assert _engine_version(by_name[name]) == FUNDAMENTAL_ENGINE_VERSION
 
 
 def test_jqdata_security_code_translation() -> None:

@@ -38,6 +38,7 @@ from alpha_research_os.reporting import (  # noqa: E402
     query_factor_assets,
     query_factor_catalog,
 )
+from scripts.factor_compute_runtime import accuracy_status  # noqa: E402
 
 STAGE_LABELS = {
     "m4_1": "基础收益关系",
@@ -165,6 +166,8 @@ def _factor_releases(project_root: Path) -> list[dict[str, Any]]:
     for path in sorted((project_root / "data" / "factor_store" / "releases").glob("*/manifest.json")):
         payload = json.loads(path.read_bytes())
         request = payload["request"]
+        verification_path = path.parent / "accuracy_verification.json"
+        verification = json.loads(verification_path.read_bytes()) if verification_path.exists() else {}
         result.append(
             {
                 "release_id": payload["release_id"],
@@ -174,6 +177,7 @@ def _factor_releases(project_root: Path) -> list[dict[str, Any]]:
                 "start": request["start"],
                 "end": request["end"],
                 "variant": request["variant"],
+                "accuracy_status": verification.get("status", "NOT_REQUIRED"),
                 "factors": [
                     {
                         "factor_id": item["factor_id"],
@@ -247,6 +251,8 @@ def build_pipeline_config(project_root: Path, request: M4RunRequest, job_id: str
     release = releases.get(request.factor_release_id)
     if release is None:
         raise ValueError("selected factor release does not exist")
+    if release.get("accuracy_status") == "FAIL":
+        raise ValueError("selected factor release failed accuracy verification and cannot start a new M4 run")
     if request.window_start < date.fromisoformat(release["start"]) or request.window_end > date.fromisoformat(
         release["end"]
     ):
@@ -481,7 +487,7 @@ class FactorJobManager:
         database = self.project_root / "data" / "warehouse" / "alpha_research.duckdb"
         with duckdb.connect(str(database), read_only=True) as connection:
             lower, upper = connection.execute(
-                "SELECT min(trade_date), max(trade_date) FROM research.universe_daily WHERE eligible_for_signal"
+                "SELECT min(trade_date), max(trade_date) FROM research.market_daily"
             ).fetchone()
         if lower is None or request.start < lower or request.end > upper:
             raise ValueError(f"calculation window must stay inside available universe data {lower}..{upper}")
@@ -545,16 +551,50 @@ class FactorJobManager:
         else:
             status = "STOPPED"
         log_tail = log_path.read_bytes()[-12_000:].decode("utf-8", errors="replace") if log_path.exists() else ""
+        started_at = request_path.stat().st_mtime
+        finished_at = (
+            result_path.stat().st_mtime
+            if result_path.exists()
+            else log_path.stat().st_mtime if status != "RUNNING" and log_path.exists() else None
+        )
+        elapsed_seconds = max(0, round((finished_at or datetime.now().timestamp()) - started_at))
+        total_years = date.fromisoformat(request["end"]).year - date.fromisoformat(request["start"]).year + 1
+        completed_years = len(set(re.findall(r"year=(\d{4}) completed", log_tail)))
+        last_log_line = next((line.strip() for line in reversed(log_tail.splitlines()) if line.strip()), "")
+        verification: dict[str, Any] = {}
+        if result and result.get("release_id"):
+            release_dir = (
+                self.project_root / "data" / "factor_store" / "releases"
+                / result["release_id"].removeprefix("sha256:")
+            )
+            verification = accuracy_status(release_dir)
         if result is not None:
-            phase, progress = "发布完成", 100
+            if verification.get("status") == "FAIL":
+                phase, progress, message = "准确性复核失败", 100, verification.get("error", "候选版本复核失败。")
+            elif verification.get("status") == "PENDING":
+                phase, progress, message = "计算完成，后台复核中", 100, "候选因子值已可使用，准确性复核正在后台运行。"
+            else:
+                phase, progress, message = "发布完成", 100, "因子值已通过准确性复核并发布。"
+        elif status == "FAIL":
+            phase, progress, message = "计算失败", 100, last_log_line or "任务异常退出，请查看运行日志。"
+        elif status == "STOPPED":
+            phase, progress, message = "已停止", 0, "计算任务已经停止。"
         elif "publishing metadata" in log_tail:
-            phase, progress = "登记不可变版本", 85
+            phase, progress, message = "登记因子版本", 96, "正在登记不可变因子版本。"
         elif "quality checking" in log_tail:
-            phase, progress = "检查数据质量", 70
+            phase, progress, message = "检查数据质量", 90, "正在检查覆盖率、重复键和非有限值。"
+        elif "accuracy checking" in log_tail:
+            phase, progress, message = "准确性复核", 78, "正在与串行参考结果逐键核对。"
+        elif "combining" in log_tail:
+            phase, progress, message = "合并年度结果", 70, "年度分片已完成，正在确定性合并。"
+        elif completed_years:
+            progress = min(65, 10 + round(55 * completed_years / total_years))
+            phase = f"年度并行计算 {completed_years}/{total_years}"
+            message = f"已完成 {completed_years} 个年度，任务仍在运行。"
         elif "materializing" in log_tail:
-            phase, progress = "计算因子值", 20
+            phase, progress, message = "计算因子值", 10, "计算进程正在运行，年度任务已经启动。"
         else:
-            phase, progress = "准备任务", 5
+            phase, progress, message = "准备任务", 3, "任务已接收，正在启动计算进程。"
         return {
             "job_id": job_id,
             "status": status,
@@ -567,7 +607,14 @@ class FactorJobManager:
             "log_tail": log_tail,
             "phase": phase,
             "progress": progress,
+            "message": message,
+            "elapsed_seconds": elapsed_seconds,
+            "accuracy_status": verification.get("status", result.get("accuracy_status") if result else None),
         }
+
+    def latest(self) -> dict[str, Any] | None:
+        requests = sorted(self.run_root.glob("*.request.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+        return None if not requests else self.status(requests[0].name.removesuffix(".request.json"))
 
 
 def make_handler(
@@ -602,6 +649,9 @@ def make_handler(
                 return
             if path == "/api/v1/factor-assets":
                 self._serve_factor_assets(parsed.query)
+                return
+            if path == "/api/v1/factors/jobs/latest":
+                self._json(HTTPStatus.OK, {"job": factor_manager.latest()})
                 return
             parts = path.strip("/").split("/")
             if len(parts) == 5 and parts[:4] == ["api", "v1", "factors", "jobs"]:
@@ -706,7 +756,10 @@ def make_handler(
                 sort_order = first("sortOrder", "asc").lower()
                 if source not in {"ALL", "CURRENT", "ALPHA158", "JQDATA"}:
                     raise ValueError("unknown factor source")
-                if status not in {"ALL", "M4_COMPLETE", "CALCULATED", "NOT_CALCULATED"}:
+                if status not in {
+                    "ALL", "M4_COMPLETE", "CALCULATED", "CALCULATED_VERIFYING",
+                    "ACCURACY_FAILED", "NOT_CALCULATED",
+                }:
                     raise ValueError("unknown calculation status")
                 if sort_by not in {"category", "name", "status", "factor_id"}:
                     raise ValueError("unknown sort field")

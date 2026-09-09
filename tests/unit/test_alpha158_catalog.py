@@ -23,6 +23,7 @@ def test_alpha158_catalog_has_exact_official_shape() -> None:
 
     assert len(catalog) == 158
     assert len(by_name) == 158
+    assert {item.factor_version for item in catalog} == {"qlib-main-catalog-2"}
     assert Counter(item.family for item in catalog)["kbar"] == 9
     assert Counter(item.family for item in catalog)["price"] == 4
     assert all(Counter(item.family for item in catalog)[family] == 5 for family in ("roc", "std", "vsumd"))
@@ -127,6 +128,36 @@ def test_old_m4_result_does_not_mark_recalculated_release_complete() -> None:
     assert _result_for_current_release(
         published, {"quality": {"release_id": "new-current-release"}}
     ) is not None
+
+
+def test_local_release_exposes_pending_and_failed_accuracy_status(tmp_path) -> None:
+    release_dir = tmp_path / "data" / "factor_store" / "releases" / "candidate"
+    release_dir.mkdir(parents=True)
+    (release_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "release_id": "sha256:candidate",
+                "created_at": "2026-09-09T08:00:00+08:00",
+                "factor_count": 1,
+                "request": {
+                    "start": "2020-01-02",
+                    "end": "2026-08-31",
+                    "factors": [{"factor_id": "alpha158-kmid", "factor_version": "qlib-main-catalog-2"}],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    verification = release_dir / "accuracy_verification.json"
+    verification.write_text(json.dumps({"status": "PENDING"}), encoding="utf-8")
+    pending = next(item for item in build_factor_catalog_overview(tmp_path) if item["factor_id"] == "alpha158-kmid")
+    assert pending["status"] == "CALCULATED_VERIFYING"
+    assert pending["status_label"] == "已计算，准确性复核中"
+
+    verification.write_text(json.dumps({"status": "FAIL", "error": "reference mismatch"}), encoding="utf-8")
+    failed = next(item for item in build_factor_catalog_overview(tmp_path) if item["factor_id"] == "alpha158-kmid")
+    assert failed["status"] == "ACCURACY_FAILED"
+    assert failed["accuracy_error"] == "reference mismatch"
 
 
 def test_catalog_filter_search_and_pagination_are_deterministic(tmp_path) -> None:

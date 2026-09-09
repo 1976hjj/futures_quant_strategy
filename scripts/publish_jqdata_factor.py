@@ -9,6 +9,7 @@ import sys
 import tempfile
 import uuid
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,12 @@ from alpha_research_os.kernel.specs import (  # noqa: E402
     ImplementationType,
     SignalCutoff,
 )
+from scripts.factor_compute_runtime import (  # noqa: E402
+    LOCAL_FACTOR_YEAR_WORKERS,
+    accuracy_status,
+    schedule_accuracy_verification,
+    year_ranges,
+)
 from scripts.publish_factor_release import (  # noqa: E402
     _atomic_write,
     _configure_bounded_connection,
@@ -53,7 +60,8 @@ from scripts.publish_factor_release import (  # noqa: E402
 )
 
 PROVIDER_ENGINE_VERSION = "jqdata-factor-values-1.0.0"
-LOCAL_ENGINE_VERSION = "jqdata-public-formula-duckdb-1.0.0"
+LOCAL_ENGINE_VERSION = "jqdata-public-formula-duckdb-1.1.0"
+FUNDAMENTAL_ENGINE_VERSION = "jqdata-public-formula-duckdb-1.1.0"
 SIGNAL_CLOCK_VERSION = "cn-close-postclose-v1"
 SECURITY_BATCH_SIZE = 400
 LOCAL_FORMULA_FACTORS = {
@@ -62,11 +70,23 @@ LOCAL_FORMULA_FACTORS = {
     "share_turnover_monthly",
     "daily_standard_deviation",
 }
+FUNDAMENTAL_FORMULA_FACTORS = {
+    "cash_earnings_to_price_ratio",
+    "earnings_to_price_ratio",
+}
+
+
+def _engine_version(item: JQDataCatalogItem) -> str:
+    if item.external_name in FUNDAMENTAL_FORMULA_FACTORS:
+        return FUNDAMENTAL_ENGINE_VERSION
+    if item.external_name in LOCAL_FORMULA_FACTORS:
+        return LOCAL_ENGINE_VERSION
+    return PROVIDER_ENGINE_VERSION
 
 
 def _catalog(item: JQDataCatalogItem) -> FactorCatalog:
     local_formula = item.external_name in LOCAL_FORMULA_FACTORS
-    engine_version = LOCAL_ENGINE_VERSION if local_formula else PROVIDER_ENGINE_VERSION
+    engine_version = _engine_version(item)
     implementation_hash = content_hash(
         {"engine": engine_version, "external_name": item.external_name, "formula": item.formula}
     )
@@ -282,7 +302,7 @@ def _local_materialization_sql(
           WITH base AS (
             SELECT u.trade_date AS session, u.ts_code AS instrument_id, u.eligible_for_signal,
               b.turnover_rate / 100.0 AS turnover_ratio
-            FROM research.universe_daily u
+            FROM research.security_session_state u
             LEFT JOIN research.daily_basic b USING (trade_date, ts_code)
             WHERE u.trade_date BETWEEN DATE {_sql_string(warmup.isoformat())}
               AND DATE {_sql_string(request.end.isoformat())}
@@ -304,8 +324,8 @@ def _local_materialization_sql(
           WITH cashflow_versions AS (
             SELECT ts_code, available_date, end_date, operating_cashflow,
               max(end_date) OVER (
-                PARTITION BY ts_code ORDER BY available_date, end_date
-                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                PARTITION BY ts_code ORDER BY available_date
+                RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
               ) AS latest_end_date
             FROM research.financial_pit_asof
             WHERE source_api='cashflow_vip' AND operating_cashflow IS NOT NULL
@@ -336,7 +356,7 @@ def _local_materialization_sql(
           ), universe AS (
             SELECT u.trade_date AS session, u.ts_code AS instrument_id, u.eligible_for_signal,
               b.total_mv * 10000.0 AS total_market_cap
-            FROM research.universe_daily u
+            FROM research.security_session_state u
             LEFT JOIN research.daily_basic b USING (trade_date, ts_code)
             WHERE u.trade_date BETWEEN DATE {_sql_string(request.start.isoformat())}
               AND DATE {_sql_string(request.end.isoformat())}
@@ -352,8 +372,8 @@ def _local_materialization_sql(
           WITH income_versions AS (
             SELECT ts_code, available_date, end_date, net_income_parent,
               max(end_date) OVER (
-                PARTITION BY ts_code ORDER BY available_date, end_date
-                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                PARTITION BY ts_code ORDER BY available_date
+                RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
               ) AS latest_end_date
             FROM research.financial_pit_asof
             WHERE source_api='income_vip' AND net_income_parent IS NOT NULL
@@ -384,7 +404,7 @@ def _local_materialization_sql(
           ), universe AS (
             SELECT u.trade_date AS session, u.ts_code AS instrument_id, u.eligible_for_signal,
               b.total_mv * 10000.0 AS total_market_cap
-            FROM research.universe_daily u
+            FROM research.security_session_state u
             LEFT JOIN research.daily_basic b USING (trade_date, ts_code)
             WHERE u.trade_date BETWEEN DATE {_sql_string(request.start.isoformat())}
               AND DATE {_sql_string(request.end.isoformat())}
@@ -401,7 +421,7 @@ def _local_materialization_sql(
             SELECT u.trade_date AS session, u.ts_code AS instrument_id, u.eligible_for_signal,
               row_number() OVER (PARTITION BY u.ts_code ORDER BY u.trade_date)::DOUBLE AS session_seq,
               CASE WHEN m.pre_close>0 THEN m.close/m.pre_close-1 END AS return_1d
-            FROM research.universe_daily u
+            FROM research.security_session_state u
             LEFT JOIN research.market_daily m USING (trade_date, ts_code)
             WHERE u.trade_date BETWEEN DATE {_sql_string(warmup.isoformat())}
               AND DATE {_sql_string(request.end.isoformat())}
@@ -436,6 +456,50 @@ def _local_materialization_sql(
     """
 
 
+def _materialize_local_yearly(
+    database: Path,
+    store: Path,
+    request: FactorAssetRequest,
+    item: JQDataCatalogItem,
+    target: Path,
+    warmup_sessions: int,
+) -> None:
+    ranges = year_ranges(request.start, request.end)
+    with tempfile.TemporaryDirectory(prefix="jqdata-local-years-", dir=target.parent) as staging_name:
+        staging = Path(staging_name)
+
+        def materialize_year(bounds: tuple[date, date]) -> Path:
+            lower, upper = bounds
+            partition = staging / f"year={lower.year}.parquet"
+            yearly_request = request.model_copy(update={"start": lower, "end": upper})
+            print(f"factor={item.factor_id} year={lower.year} materializing", flush=True)
+            with duckdb.connect(str(database), read_only=True) as connection:
+                _configure_bounded_connection(connection, store / "duckdb_tmp")
+                warmup = _warmup_start(connection, lower, warmup_sessions)
+                connection.execute(_local_materialization_sql(item, yearly_request, partition, warmup))
+            print(f"factor={item.factor_id} year={lower.year} completed", flush=True)
+            return partition
+
+        worker_count = min(LOCAL_FACTOR_YEAR_WORKERS, len(ranges))
+        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="factor-year") as executor:
+            partitions = list(executor.map(materialize_year, ranges))
+
+        sources = ",".join(_sql_string(_sql_path(path)) for path in partitions)
+        print(f"factor={item.factor_id} combining {len(partitions)} yearly partitions", flush=True)
+        with duckdb.connect() as connection:
+            _configure_bounded_connection(connection, store / "duckdb_tmp")
+            connection.execute(
+                f"""COPY (
+                  SELECT {_sql_string(request.computation_key)} AS release_id,
+                    session, instrument_id, factor_id, factor_version, variant, value,
+                    available_at, implementation_hash
+                  FROM read_parquet([{sources}])
+                  ORDER BY session, instrument_id, factor_id, factor_version
+                ) TO '{_sql_path(target)}'
+                (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 6, ROW_GROUP_SIZE 122880)"""
+            )
+
+
 def publish(database: Path, store: Path, factor_id: str, start: date, end: date) -> dict[str, Any]:
     items = {item.factor_id: item for item in jqdata_catalog()}
     if factor_id not in items:
@@ -445,7 +509,7 @@ def publish(database: Path, store: Path, factor_id: str, start: date, end: date)
     cataloged = catalog.list()[0]
     spec = cataloged.entry.spec
     local_formula = item.external_name in LOCAL_FORMULA_FACTORS
-    engine_version = LOCAL_ENGINE_VERSION if local_formula else PROVIDER_ENGINE_VERSION
+    engine_version = _engine_version(item)
     with duckdb.connect(str(database), read_only=True) as connection:
         lineage = _lineage(connection)
         m2b_hash = next(
@@ -478,46 +542,59 @@ def publish(database: Path, store: Path, factor_id: str, start: date, end: date)
             raise ValueError("cached JQData release failed immutable identity verification")
         quality = json.loads(quality_path.read_bytes())
         _register(database, store, manifest, content_hash(manifest), catalog, quality["factors"], "jqdata")
-        return {"cache_hit": True, "release_id": manifest.release_id, "manifest": str(manifest_path.resolve())}
+        return {"cache_hit": True, "release_id": manifest.release_id,
+            "accuracy_status": accuracy_status(release_dir).get("status"),
+            "manifest": str(manifest_path.resolve())}
 
     release_dir.mkdir(parents=True, exist_ok=True)
     temporary = release_dir / f".raw_factor_values.{uuid.uuid4().hex}.tmp.parquet"
-    print(f"factor={factor_id} materializing {start}..{end}", flush=True)
-    if local_formula:
-        with duckdb.connect(str(database), read_only=True) as connection:
-            _configure_bounded_connection(connection, store / "duckdb_tmp")
-            connection.execute(_local_materialization_sql(item, request, temporary, warmup))
-    else:
-        _materialize(database, store, request, item, temporary)
-    print("quality checking", flush=True)
-    quality, details = _quality(temporary, 1)
-    os.replace(temporary, parquet)
-    _atomic_write(quality_path, canonical_json_bytes(quality))
-    manifest = FactorReleaseManifest(
-        release_id=request.computation_key,
-        request=request,
-        created_at=datetime.now().astimezone(),
-        parquet_relative_path=parquet.relative_to(store).as_posix(),
-        parquet_hash=_sha256_file(parquet),
-        row_count=quality["row_count"],
-        session_count=quality["session_count"],
-        instrument_count=quality["instrument_count"],
-        factor_count=1,
-        quality_status="PASS",
-        quality_summary_hash=_sha256_file(quality_path),
-    )
-    _atomic_write(manifest_path, canonical_json_bytes(manifest))
-    print("publishing metadata", flush=True)
-    _register(database, store, manifest, content_hash(manifest), catalog, details, "jqdata")
-    return {
-        "cache_hit": False,
-        "release_id": manifest.release_id,
-        "factor_id": factor_id,
-        "row_count": manifest.row_count,
-        "session_count": manifest.session_count,
-        "instrument_count": manifest.instrument_count,
-        "manifest": str(manifest_path.resolve()),
-    }
+    try:
+        print(f"factor={factor_id} materializing {start}..{end}", flush=True)
+        if local_formula:
+            if (end - start).days > 370:
+                _materialize_local_yearly(database, store, request, item, temporary, spec.warmup_sessions)
+            else:
+                with duckdb.connect(str(database), read_only=True) as connection:
+                    _configure_bounded_connection(connection, store / "duckdb_tmp")
+                    connection.execute(_local_materialization_sql(item, request, temporary, warmup))
+        else:
+            _materialize(database, store, request, item, temporary)
+        print("quality checking", flush=True)
+        quality, details = _quality(temporary, 1)
+        os.replace(temporary, parquet)
+        _atomic_write(quality_path, canonical_json_bytes(quality))
+        manifest = FactorReleaseManifest(
+            release_id=request.computation_key,
+            request=request,
+            created_at=datetime.now().astimezone(),
+            parquet_relative_path=parquet.relative_to(store).as_posix(),
+            parquet_hash=_sha256_file(parquet),
+            row_count=quality["row_count"],
+            session_count=quality["session_count"],
+            instrument_count=quality["instrument_count"],
+            factor_count=1,
+            quality_status="PASS",
+            quality_summary_hash=_sha256_file(quality_path),
+        )
+        _atomic_write(manifest_path, canonical_json_bytes(manifest))
+        print("publishing metadata", flush=True)
+        _register(database, store, manifest, content_hash(manifest), catalog, details, "jqdata")
+        verification = (
+            schedule_accuracy_verification(database, store, manifest.release_id, factor_id)
+            if local_formula else {"status": "NOT_REQUIRED"}
+        )
+        return {
+            "cache_hit": False,
+            "release_id": manifest.release_id,
+            "factor_id": factor_id,
+            "row_count": manifest.row_count,
+            "session_count": manifest.session_count,
+            "instrument_count": manifest.instrument_count,
+            "accuracy_status": verification["status"],
+            "manifest": str(manifest_path.resolve()),
+        }
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def main() -> int:

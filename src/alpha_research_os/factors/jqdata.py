@@ -51,6 +51,7 @@ def jqdata_catalog() -> tuple[JQDataCatalogItem, ...]:
         JQDataCatalogItem(
             factor_id="jqdata-cash-earnings-to-price-ratio",
             external_name="cash_earnings_to_price_ratio",
+            factor_version="jqdata-factorlib-2",
             chinese_name="现金流量市值比",
             category="估值",
             family="jqdata-valuation",
@@ -62,6 +63,7 @@ def jqdata_catalog() -> tuple[JQDataCatalogItem, ...]:
         JQDataCatalogItem(
             factor_id="jqdata-earnings-to-price-ratio",
             external_name="earnings_to_price_ratio",
+            factor_version="jqdata-factorlib-2",
             chinese_name="利润市值比（TTM盈利收益率）",
             category="估值",
             family="jqdata-valuation",
@@ -73,6 +75,7 @@ def jqdata_catalog() -> tuple[JQDataCatalogItem, ...]:
         JQDataCatalogItem(
             factor_id="jqdata-share-turnover-monthly",
             external_name="share_turnover_monthly",
+            factor_version="jqdata-factorlib-2",
             chinese_name="月换手率",
             category="流动性",
             family="jqdata-liquidity",
@@ -84,6 +87,7 @@ def jqdata_catalog() -> tuple[JQDataCatalogItem, ...]:
         JQDataCatalogItem(
             factor_id="jqdata-daily-standard-deviation",
             external_name="daily_standard_deviation",
+            factor_version="jqdata-factorlib-2",
             chinese_name="日收益率标准差（252日指数加权）",
             category="波动",
             family="jqdata-risk",
