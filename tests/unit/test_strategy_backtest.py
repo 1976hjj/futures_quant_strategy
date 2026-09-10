@@ -100,6 +100,38 @@ def test_selection_filters_then_scores_and_keeps_buffer_holding() -> None:
     assert result["holdings"][0]["retained"] is True
 
 
+def test_selection_enforces_real_industry_position_cap() -> None:
+    request = _request(filter_rules=[], target_count=4, retention_rank=4)
+    rows = [
+        {
+            "ts_code": f"{index:06d}.SZ",
+            "security_name": f"stock {index}",
+            "is_st": False,
+            "listed_session_number": 300,
+            "factor_values": {("value", DIGEST_A): float(index)},
+        }
+        for index in range(8)
+    ]
+    industries = {
+        "000007.SZ": "A", "000006.SZ": "A", "000005.SZ": "A",
+        "000004.SZ": "B", "000003.SZ": "B", "000002.SZ": "C",
+        "000001.SZ": "C", "000000.SZ": "D",
+    }
+
+    result = select_portfolio(
+        rows,
+        request,
+        industry_by_code=industries,
+        maximum_industry_weight=0.25,
+    )
+
+    assert [item["ts_code"] for item in result["holdings"]] == [
+        "000007.SZ", "000004.SZ", "000002.SZ", "000000.SZ",
+    ]
+    assert result["industry_counts"] == {"A": 1, "B": 1, "C": 1, "D": 1}
+    assert result["industry_limit_excluded"] == 4
+
+
 def test_maximum_drawdown_period_reports_peak_trough_and_recovery() -> None:
     period = _maximum_drawdown_period(
         [

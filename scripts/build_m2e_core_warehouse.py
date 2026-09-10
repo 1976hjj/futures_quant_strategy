@@ -172,10 +172,11 @@ def _assert_priority_complete(checkpoint: dict[str, Any], reference: Path) -> No
             completed["index_classify"], f"SW2021:{level}", PAGE_SIZES["index_classify"]
         ):
             raise ValueError(f"index_classify is incomplete: {level}")
-    if not _terminal_partition_exists(
-        completed["index_member_all"], "SW2021:all-history", PAGE_SIZES["index_member_all"]
-    ):
-        raise ValueError("index_member_all is incomplete")
+    for membership_scope in ("SW2021:current", "SW2021:all-history"):
+        if not _terminal_partition_exists(
+            completed["index_member_all"], membership_scope, PAGE_SIZES["index_member_all"]
+        ):
+            raise ValueError(f"index_member_all is incomplete: {membership_scope}")
 
 
 def _projection(checkpoint: dict[str, Any]) -> dict[str, Any]:

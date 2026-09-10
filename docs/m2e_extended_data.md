@@ -9,7 +9,8 @@ M2-E 的目标不是一次性增加尽可能多的数据，而是补齐会改变
 第一队列（核心底座）：
 
 - `index_basic`：指数档案；
-- `index_classify`、`index_member_all`：申万 2021 分类及带进入/退出日期的历史行业成员；
+- `index_classify`、`index_member_all`：申万 2021 分类，以及 `is_new=Y` 当前成员和
+  `is_new=N` 历史退出记录；两组必须同时存在，才能形成可用于截面约束的行业归属；
 - `index_weight`：沪深 300、中证 500、中证 1000、上证 50、科创 50 的月度权重；
 - `stk_limit`：每日涨跌停价，用于成交可行性判断；
 - `disclosure_date`：财报预计与实际披露日；

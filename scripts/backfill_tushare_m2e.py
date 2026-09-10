@@ -199,7 +199,26 @@ def _tasks(start: date, end: date, sessions: list[str], periods: list[str], secu
         tasks.append(
             Task("index_classify", f"SW2021:{level}", end, end, ("src=SW2021", f"level={level}"), page_size=2000)
         )
-    tasks.append(Task("index_member_all", "SW2021:all-history", end, end, ("is_new=N",), page_size=2000))
+    tasks.extend(
+        (
+            Task(
+                "index_member_all",
+                "SW2021:current",
+                end,
+                end,
+                ("is_new=Y",),
+                page_size=2000,
+            ),
+            Task(
+                "index_member_all",
+                "SW2021:all-history",
+                end,
+                end,
+                ("is_new=N",),
+                page_size=2000,
+            ),
+        )
+    )
     usable_periods = [value for value in periods if start <= datetime.strptime(value, "%Y%m%d").date() <= end]
     for period in usable_periods:
         period_date = datetime.strptime(period, "%Y%m%d").date()

@@ -26,6 +26,11 @@ for import_root in (PROJECT_ROOT, SRC_ROOT):
         sys.path.insert(0, str(import_root))
 
 from alpha_research_os.kernel.canonical import canonical_json_bytes  # noqa: E402
+from alpha_research_os.portfolio.rotation_backtest import (  # noqa: E402
+    RotationBacktestRequest,
+    preflight_rotation,
+    preview_rotation,
+)
 from alpha_research_os.portfolio.strategy_backtest import (  # noqa: E402
     StrategyBacktestRequest,
     preflight,
@@ -68,6 +73,75 @@ def strategy_options(project_root: Path) -> dict[str, Any]:
     }
 
 
+def rotation_options(project_root: Path) -> dict[str, Any]:
+    """Expose rotation capabilities while reusing the published factor catalogue."""
+
+    options = strategy_options(project_root)
+    factor_catalog = build_factor_catalog_overview(project_root)
+    factors = [
+        {
+            "factor_id": item["factor_id"],
+            "factor_version": item["factor_version"],
+            "release_id": item["latest_release_id"],
+            "chinese_name": item["chinese_name"],
+            "source_collection": item["source_collection"],
+            "category": item["category"],
+            "expected_direction": item.get("expected_direction") or "HIGH",
+            "calculated": bool(item["calculated"]),
+            "status": item["status"],
+            "status_label": item["status_label"],
+            "start": (item.get("coverage") or {}).get("start"),
+            "end": (item.get("coverage") or {}).get("end"),
+        }
+        for item in factor_catalog
+        if item.get("accuracy_status") != "FAIL"
+    ]
+    return {
+        **options,
+        "factors": sorted(
+            factors,
+            key=lambda item: (
+                not item["calculated"],
+                item["source_collection"],
+                item["category"],
+                item["chinese_name"],
+            ),
+        ),
+        "factor_counts": {
+            "total": len(factors),
+            "calculated": sum(1 for item in factors if item["calculated"]),
+            "needs_calculation": sum(1 for item in factors if not item["calculated"]),
+        },
+        "strategy_type": "ROTATION",
+        "candidate_kinds": [{"id": "FACTOR", "name": "因子选股组合"}],
+        "signal_metrics": [
+            {"id": "TRAILING_RETURN", "name": "区间收益"},
+            {"id": "EXCESS_RETURN", "name": "相对基准超额收益"},
+            {"id": "RISK_ADJUSTED_RETURN", "name": "风险调整收益"},
+        ],
+        "allocation_modes": [
+            {"id": "WINNER_TAKE_ALL", "name": "领先组合全仓"},
+            {"id": "WINNER_TILT", "name": "领先组合倾斜"},
+            {"id": "SCORE_WEIGHTED", "name": "按正得分分配"},
+        ],
+        "industry_controls": [
+            {"id": "NONE", "name": "不限制"},
+            {"id": "CAP", "name": "行业权重上限"},
+        ],
+        "limits": {"minimum_candidates": 2, "maximum_candidates": 8},
+        "rotation_defaults": {
+            "lookback_sessions": 20,
+            "decision_interval_sessions": 1,
+            "switch_threshold": 0.01,
+            "confirmation_periods": 1,
+            "minimum_hold_periods": 1,
+            "allocation_mode": "WINNER_TAKE_ALL",
+            "winner_weight": 0.70,
+            "maximum_industry_weight": 0.25,
+        },
+    }
+
+
 class StrategyJobManager:
     def __init__(self, project_root: Path) -> None:
         self.project_root = project_root
@@ -82,8 +156,15 @@ class StrategyJobManager:
         return self.process is not None and self.process.poll() is None
 
     def start(self, payload: dict[str, Any]) -> dict[str, Any]:
-        request = StrategyBacktestRequest.model_validate(payload)
-        preflight(self.project_root, request)
+        is_rotation = payload.get("strategy_type") == "ROTATION"
+        if is_rotation:
+            request = RotationBacktestRequest.model_validate(payload)
+            preflight_rotation(self.project_root, request)
+            runner = "scripts/run_rotation_backtest.py"
+        else:
+            request = StrategyBacktestRequest.model_validate(payload)
+            preflight(self.project_root, request)
+            runner = "scripts/run_strategy_backtest.py"
         with self.lock:
             if self.running():
                 raise RuntimeError(f"strategy job {self.active_job_id} is already running")
@@ -99,7 +180,7 @@ class StrategyJobManager:
             self.process = subprocess.Popen(
                 [
                     sys.executable,
-                    "scripts/run_strategy_backtest.py",
+                    runner,
                     "--project-root", str(self.project_root),
                     "--request", str(request_path),
                     "--result", str(result_path),
@@ -182,7 +263,9 @@ class StrategyJobManager:
         updated_paths = (request_path, log_path, result_path, progress_path)
         return {
             "job_id": job_id, "status": status, "phase": phase, "progress": progress,
-            "name": request["name"], "log_tail": log_tail, "result": result,
+            "name": request["name"],
+            "strategy_type": request.get("strategy_type", "FACTOR"),
+            "log_tail": log_tail, "result": result,
             "trade_detail_available": bool(isinstance(stored_result, dict) and "trades" in stored_result),
             "execution_model_valid": bool(
                 isinstance(stored_result, dict)
@@ -318,6 +401,9 @@ def make_handler(project_root: Path, origins: set[str], manager: StrategyJobMana
             if path == "/api/v1/strategy/options":
                 self._json(HTTPStatus.OK, strategy_options(project_root))
                 return
+            if path == "/api/v1/rotation/options":
+                self._json(HTTPStatus.OK, rotation_options(project_root))
+                return
             if path == "/api/v1/strategy/jobs":
                 self._json(HTTPStatus.OK, {"jobs": manager.list()})
                 return
@@ -365,6 +451,25 @@ def make_handler(project_root: Path, origins: set[str], manager: StrategyJobMana
                         HTTPStatus.OK,
                         preview(project_root, request, date.fromisoformat(preview_date_text)),
                     )
+                    return
+                if path == "/api/v1/rotation/preflight":
+                    rotation_request = RotationBacktestRequest.model_validate(payload)
+                    self._json(HTTPStatus.OK, preflight_rotation(project_root, rotation_request))
+                    return
+                if path == "/api/v1/rotation/preview":
+                    preview_date_text = str(payload.pop("preview_date", payload.get("start", "")))
+                    rotation_request = RotationBacktestRequest.model_validate(payload)
+                    self._json(
+                        HTTPStatus.OK,
+                        preview_rotation(
+                            project_root,
+                            rotation_request,
+                            date.fromisoformat(preview_date_text),
+                        ),
+                    )
+                    return
+                if path == "/api/v1/rotation/jobs":
+                    self._json(HTTPStatus.ACCEPTED, manager.start(payload))
                     return
                 request = StrategyBacktestRequest.model_validate(payload)
                 if path == "/api/v1/strategy/preflight":

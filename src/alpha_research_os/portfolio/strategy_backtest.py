@@ -389,6 +389,10 @@ def select_portfolio(
     rows: list[dict[str, Any]],
     request: StrategyBacktestRequest,
     existing_holdings: set[str] | None = None,
+    *,
+    industry_by_code: dict[str, str] | None = None,
+    maximum_industry_weight: float | None = None,
+    missing_industry_policy: Literal["UNKNOWN_BUCKET", "EXCLUDE"] = "UNKNOWN_BUCKET",
 ) -> dict[str, Any]:
     existing_holdings = existing_holdings or set()
     base = [
@@ -396,6 +400,11 @@ def select_portfolio(
         for row in rows
         if (not request.exclude_st or not row["is_st"])
         and (row["listed_session_number"] or 0) >= request.minimum_listed_sessions
+        and not (
+            industry_by_code is not None
+            and missing_industry_policy == "EXCLUDE"
+            and row["ts_code"] not in industry_by_code
+        )
     ]
     base_count = len(base)
     survivors = base
@@ -440,12 +449,35 @@ def select_portfolio(
         (code for code in existing_holdings if rank_by_code.get(code, 10**9) <= request.retention_rank),
         key=rank_by_code.__getitem__,
     )
-    selected = retained[: request.target_count]
+    selected: list[str] = []
+    industry_counts: dict[str, int] = {}
+    industry_limit_excluded = 0
+    maximum_per_industry = (
+        max(1, math.floor(request.target_count * maximum_industry_weight))
+        if industry_by_code is not None and maximum_industry_weight is not None
+        else None
+    )
+
+    def add_if_allowed(code: str) -> bool:
+        nonlocal industry_limit_excluded
+        if code in selected:
+            return False
+        industry = (industry_by_code or {}).get(code, "UNKNOWN")
+        if maximum_per_industry is not None and industry_counts.get(industry, 0) >= maximum_per_industry:
+            industry_limit_excluded += 1
+            return False
+        selected.append(code)
+        industry_counts[industry] = industry_counts.get(industry, 0) + 1
+        return True
+
+    for code in retained:
+        if len(selected) >= request.target_count:
+            break
+        add_if_allowed(code)
     for row in ranked_rows:
         if len(selected) >= request.target_count:
             break
-        if row["ts_code"] not in selected:
-            selected.append(row["ts_code"])
+        add_if_allowed(row["ts_code"])
     by_code = {row["ts_code"]: row for row in ranked_rows}
     holdings = [
         {
@@ -454,6 +486,7 @@ def select_portfolio(
             "security_name": by_code[code]["security_name"],
             "score": scores[code],
             "retained": code in retained,
+            "industry_code": (industry_by_code or {}).get(code),
             "factor_values": {
                 rule.factor_id: by_code[code]["factor_values"][(rule.factor_id, rule.release_id)]
                 for rule in request.score_rules
@@ -467,8 +500,30 @@ def select_portfolio(
         "score_ready": len(score_ready),
         "missing_score_excluded": len(survivors) - len(score_ready),
         "filter_counts": filter_counts,
+        "industry_limit_excluded": industry_limit_excluded,
+        "industry_counts": industry_counts,
         "holdings": holdings,
     }
+
+
+def _pit_industry_by_code(
+    connection: duckdb.DuckDBPyConnection, signal_date: date, ts_codes: list[str]
+) -> dict[str, str]:
+    if not ts_codes:
+        return {}
+    codes = sorted(set(ts_codes))
+    placeholders = ",".join("?" for _ in codes)
+    rows = connection.execute(
+        f"""SELECT ts_code, l1_code
+        FROM research.sw_industry_membership
+        WHERE in_date <= ? AND (out_date IS NULL OR ? < out_date)
+          AND ts_code IN ({placeholders})
+        QUALIFY row_number() OVER (
+          PARTITION BY ts_code ORDER BY in_date DESC, source_snapshot_id DESC, l3_code DESC
+        )=1""",
+        [signal_date, signal_date, *codes],
+    ).fetchall()
+    return {str(ts_code): str(industry_code) for ts_code, industry_code in rows}
 
 
 def preview(project_root: Path, request: StrategyBacktestRequest, signal_date: date) -> dict[str, Any]:
@@ -723,6 +778,10 @@ def run_backtest(
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     *,
     market_data_mode: Literal["prefetch", "legacy"] = "prefetch",
+    target_schedule: dict[date, dict[str, float]] | None = None,
+    include_selection_history: bool = False,
+    maximum_industry_weight: float | None = None,
+    missing_industry_policy: Literal["UNKNOWN_BUCKET", "EXCLUDE"] = "UNKNOWN_BUCKET",
 ) -> dict[str, Any]:
     checked = preflight(project_root, request)
     resolved = _resolve_inputs(project_root, request)
@@ -751,8 +810,25 @@ def run_backtest(
                 [request.start, request.end],
             ).fetchall()
         ]
-        signal_sessions = set(sessions[:: request.rebalance_sessions])
-        signal_cache = _signal_cache_path(project_root, resolved, signal_sessions)
+        signal_sessions = (
+            set(target_schedule)
+            if target_schedule is not None
+            else set(sessions[:: request.rebalance_sessions])
+        )
+        invalid_schedule_dates = signal_sessions - set(sessions)
+        if invalid_schedule_dates:
+            raise ValueError("target schedule contains dates outside the backtest sessions")
+        if target_schedule is not None:
+            for signal_session, weights in target_schedule.items():
+                if any(not math.isfinite(weight) or weight < 0 for weight in weights.values()):
+                    raise ValueError(f"target schedule has invalid weights on {signal_session}")
+                if weights and not math.isclose(sum(weights.values()), 1.0, rel_tol=0, abs_tol=1e-9):
+                    raise ValueError(f"target schedule weights must sum to one on {signal_session}")
+        signal_cache = (
+            None
+            if target_schedule is not None
+            else _signal_cache_path(project_root, resolved, signal_sessions)
+        )
         if progress_callback:
             progress_callback(
                 {
@@ -765,7 +841,8 @@ def run_backtest(
                     "position_count": 0,
                 }
             )
-        _prepare_signal_table(connection, resolved, signal_sessions, signal_cache, progress_callback)
+        if target_schedule is None:
+            _prepare_signal_table(connection, resolved, signal_sessions, signal_cache, progress_callback)
         if progress_callback:
             progress_callback({"phase": "连续账户回放", "progress": 18})
         positions: dict[str, int] = {}
@@ -773,7 +850,8 @@ def run_backtest(
         position_dividends: dict[str, float] = {}
         last_marks: dict[str, float] = {}
         cash = request.initial_cash_cny
-        pending_target: list[str] | None = None
+        pending_target: dict[str, float] | None = None
+        selection_history: list[dict[str, Any]] = []
         daily: list[dict[str, Any]] = []
         # Keep only completed transactions.  Failed orders are already represented
         # in rejection_counts, while persisting each of them would needlessly grow
@@ -831,11 +909,10 @@ def run_backtest(
 
             if pending_target is not None:
                 rebalance_count += 1
-                target_value = open_nav * (1 - request.minimum_cash_fraction) / max(len(pending_target), 1)
                 target_quantities = {
                     code: _target_share_quantity(
                         code,
-                        target_value,
+                        open_nav * (1 - request.minimum_cash_fraction) * pending_target[code],
                         float((bars.get(code, {}).get("open") or 0) or last_marks.get(code, 0)),
                     )
                     for code in target_set
@@ -1029,10 +1106,44 @@ def run_backtest(
             )
 
             if session in signal_sessions and session != sessions[-1]:
-                selection = select_portfolio(
-                    _signal_rows(connection, resolved, request, session, prepared=True), request, set(positions)
-                )
-                pending_target = [item["ts_code"] for item in selection["holdings"]]
+                if target_schedule is not None:
+                    pending_target = dict(target_schedule[session])
+                    selected_holdings = [
+                        {"ts_code": code, "weight": weight}
+                        for code, weight in pending_target.items()
+                    ]
+                else:
+                    signal_rows = _signal_rows(connection, resolved, request, session, prepared=True)
+                    industry_by_code = (
+                        _pit_industry_by_code(
+                            connection,
+                            session,
+                            [str(item["ts_code"]) for item in signal_rows],
+                        )
+                        if maximum_industry_weight is not None
+                        else None
+                    )
+                    selection = select_portfolio(
+                        signal_rows,
+                        request,
+                        set(positions),
+                        industry_by_code=industry_by_code,
+                        maximum_industry_weight=maximum_industry_weight,
+                        missing_industry_policy=missing_industry_policy,
+                    )
+                    selected_holdings = selection["holdings"]
+                    count = len(selected_holdings)
+                    pending_target = {
+                        item["ts_code"]: 1 / count for item in selected_holdings
+                    } if count else {}
+                if include_selection_history:
+                    selection_history.append(
+                        {
+                            "signal_session": session.isoformat(),
+                            "execution_session": sessions[session_index].isoformat(),
+                            "holdings": selected_holdings,
+                        }
+                    )
                 if market_data_mode == "prefetch" and session_index < len(sessions):
                     next_session = sessions[session_index]
                     uncached = set(pending_target) - set(market_cache)
@@ -1077,7 +1188,7 @@ def run_backtest(
             row["daily_return"] for row in daily if date.fromisoformat(row["session"]).year == year
         ]
         annual.append({"year": year, "return": math.prod(1 + value for value in year_returns) - 1})
-    return {
+    result = {
         "status": "PASS",
         "run_id": request.config_id,
         "created_at": datetime.now().astimezone().isoformat(),
@@ -1113,3 +1224,6 @@ def run_backtest(
         "drawdown_period": drawdown_period,
         "latest_holdings": sorted(positions),
     }
+    if include_selection_history:
+        result["selection_history"] = selection_history
+    return result

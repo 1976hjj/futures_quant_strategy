@@ -9,7 +9,8 @@ from scripts.publish_jqdata_factor import FUNDAMENTAL_ENGINE_VERSION, _catalog, 
 
 def test_jqdata_catalog_contains_selected_originals_and_local_replacements() -> None:
     items = jqdata_catalog()
-    assert [item.external_name for item in items] == [
+    names = [item.external_name for item in items]
+    assert names[:6] == [
         "predicted_earnings_to_price_ratio",
         "cash_earnings_to_price_ratio",
         "earnings_to_price_ratio",
@@ -17,6 +18,13 @@ def test_jqdata_catalog_contains_selected_originals_and_local_replacements() -> 
         "daily_standard_deviation",
         "resvol",
     ]
+    assert set(names[6:]) == {
+        "book_to_price_ratio", "cash_flow_to_price_ratio", "roe_ttm", "roa_ttm", "ACCA",
+        "adjusted_profit_to_total_profit", "net_operating_cash_flow_coverage",
+        "debt_to_equity_ratio", "growth", "momentum", "Rank1M", "Variance20",
+        "sharpe_ratio_60", "beta", "ATR6", "DAVOL10", "liquidity",
+        "natural_log_of_market_cap",
+    }
     by_name = {item.external_name: item for item in items}
     assert by_name["cash_earnings_to_price_ratio"].factor_version == "jqdata-factorlib-2"
     assert by_name["earnings_to_price_ratio"].factor_version == "jqdata-factorlib-2"
@@ -34,17 +42,17 @@ def test_jqdata_catalog_contains_selected_originals_and_local_replacements() -> 
     assert by_name["resvol"].formula == (
         "0.50 * daily_std + 0.42 * historical_resid_sigma + 0.08 * cum_range"
     )
-    assert [item.expected_direction for item in items] == [
+    assert [item.expected_direction for item in items[:6]] == [
         "HIGH", "HIGH", "HIGH", "LOW", "LOW", "LOW"
     ]
 
 
 def test_jqdata_catalog_is_a_separate_source_filter(tmp_path) -> None:
     response = query_factor_catalog(
-        build_factor_catalog_overview(tmp_path), page=1, page_size=20, source="JQDATA"
+        build_factor_catalog_overview(tmp_path), page=1, page_size=30, source="JQDATA"
     )
-    assert response["totalItems"] == 6
-    assert response["counts"]["jqdata"] == 6
+    assert response["totalItems"] == 24
+    assert response["counts"]["jqdata"] == 24
     assert all(item["source_collection"] == "JQDATA" for item in response["items"])
 
 

@@ -35,6 +35,22 @@ def test_m2e_hk_hold_stops_before_daily_disclosure_ended() -> None:
     assert hk_dates == ["20240819"]
 
 
+def test_m2e_fetches_current_and_historical_industry_memberships() -> None:
+    tasks = _tasks(
+        date(2024, 1, 1),
+        date(2024, 1, 2),
+        sessions=["20240102"],
+        periods=[],
+        securities=["600036.SH"],
+    )
+    memberships = [task for task in tasks if task.api == "index_member_all"]
+
+    assert [(task.key, task.params) for task in memberships] == [
+        ("SW2021:current", ("is_new=Y",)),
+        ("SW2021:all-history", ("is_new=N",)),
+    ]
+
+
 def test_m2e_all_market_month_range_keeps_explicit_dates() -> None:
     task = Task(
         "index_weight",
