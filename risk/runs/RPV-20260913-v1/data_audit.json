@@ -1,0 +1,22 @@
+{
+  "generated_at": "2026-09-13T21:05:00.586280+08:00",
+  "oos_start": "2018-01-02",
+  "oos_end": "2026-09-01",
+  "index_rows": {
+    "CSI1000": 3318,
+    "CSI2000": 3081,
+    "CSI300": 3318
+  },
+  "market_feature_rows": 3318,
+  "market_feature_start": "2013-01-04",
+  "market_feature_end": "2026-09-01",
+  "pricing": "price_index",
+  "cash_return": 0.0,
+  "source": "Tushare-compatible index_daily plus local append-only Tushare daily parquet",
+  "holdout_claim": "diagnostic pseudo-OOS; no unseen-holdout claim",
+  "index_duplicate_rows": 0,
+  "invalid_ohlc_rows": 0,
+  "oos_missing_risk_scores": 0,
+  "oos_risk_score_min": 6.898148148148148,
+  "oos_risk_score_max": 95.21825396825396
+}

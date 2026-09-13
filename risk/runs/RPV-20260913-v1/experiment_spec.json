@@ -1,0 +1,83 @@
+{
+  "schema_version": "risk-positioning-v1",
+  "data_start": "2013-01-01",
+  "data_end": "2026-09-01",
+  "oos_start": "2018-01-01",
+  "rolling_percentile_window": 756,
+  "rolling_percentile_min_periods": 252,
+  "breadth_return_sessions": 20,
+  "trend_ma_sessions": 200,
+  "volatility_sessions": 20,
+  "liquidity_median_sessions": 60,
+  "stress_smoothing_sessions": 5,
+  "tail_loss_threshold": -0.05,
+  "volatility_target": 0.15,
+  "annualization_sessions": 252,
+  "train_years": 3,
+  "one_way_cost_bps": 5.0,
+  "cost_sensitivity_bps": [
+    0.0,
+    5.0,
+    10.0,
+    20.0
+  ],
+  "bootstrap_repetitions": 500,
+  "bootstrap_block_sessions": 20,
+  "weights": {
+    "breadth": 0.3,
+    "trend": 0.2,
+    "volatility": 0.15,
+    "liquidity": 0.15,
+    "stress_tail": 0.2
+  },
+  "position_ladder": [
+    {
+      "risk_min": 0.0,
+      "risk_max": 20.0,
+      "include_max": false,
+      "position": 1.0
+    },
+    {
+      "risk_min": 20.0,
+      "risk_max": 40.0,
+      "include_max": false,
+      "position": 0.85
+    },
+    {
+      "risk_min": 40.0,
+      "risk_max": 60.0,
+      "include_max": false,
+      "position": 0.65
+    },
+    {
+      "risk_min": 60.0,
+      "risk_max": 80.0,
+      "include_max": false,
+      "position": 0.4
+    },
+    {
+      "risk_min": 80.0,
+      "risk_max": 100.0,
+      "include_max": true,
+      "position": 0.2
+    }
+  ],
+  "indices": [
+    {
+      "id": "CSI300",
+      "name": "沪深300",
+      "ts_code": "000300.SH"
+    },
+    {
+      "id": "CSI1000",
+      "name": "中证1000",
+      "ts_code": "000852.SH"
+    },
+    {
+      "id": "CSI2000",
+      "name": "中证2000",
+      "ts_code": "932000.CSI",
+      "published_on": "2023-08-11"
+    }
+  ]
+}

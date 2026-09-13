@@ -1,0 +1,74 @@
+{
+  "generated_at": "2026-09-13T21:01:01.831832+08:00",
+  "config_sha256": "a5d43c04960a77077f9541fa087a8625631cf6b6b9c16f444e966aae0afbf537",
+  "files": {
+    "comparison.csv": {
+      "sha256": "e8a2d2c153307a46000182eb8c00f2d4e262bf8cbd33f906b939a2bad675f508",
+      "bytes": 4296
+    },
+    "daily_evidence.csv": {
+      "sha256": "60495f14539a6128b665e91e476da42fb4faab3376a360860ea3edc5966a8331",
+      "bytes": 8112130
+    },
+    "data_audit.json": {
+      "sha256": "3fb9712e4a8d2956ec731a3f53cbe0871b2d76ab30068886a46e9c90a95e1e1e",
+      "bytes": 531
+    },
+    "drawdown.png": {
+      "sha256": "1dbf3f53ce7ee844b40cbb6e1ee98af2603e6df9fb5cd7ce18efd8bfb0de71c0",
+      "bytes": 1139945
+    },
+    "experiment_spec.json": {
+      "sha256": "ff5b668513dc2e68f570917f760bb1116089516634ed2fc11b9de15e14e10d52",
+      "bytes": 1771
+    },
+    "full_sample_constant_csi1000.csv": {
+      "sha256": "cfaf8aaf6c641246527ec90bd6fdd9bd1e08fae13dee2871dd0f482343640427",
+      "bytes": 451
+    },
+    "full_sample_constant_csi2000.csv": {
+      "sha256": "4bedb0840ee1280afb9b35aeb97244b1f1adfec0ff891e3c088967ea0e4ace7d",
+      "bytes": 450
+    },
+    "full_sample_constant_csi300.csv": {
+      "sha256": "2b51de24bb731389b22e3bc31b7c4e259c726bf37e107ac02b7c80ec3ccad097",
+      "bytes": 446
+    },
+    "full_sample_constant_diagnostic.csv": {
+      "sha256": "7b0f87abfaac85879fe52c82fcebe4570b0ee0baec74a700135d1fd7f69e9fca",
+      "bytes": 937
+    },
+    "indices_daily.csv": {
+      "sha256": "18716ae530f1763e973444186dc548dd9af78e6bedade3a2b346bcfe5541b4ed",
+      "bytes": 1194491
+    },
+    "market_features.csv": {
+      "sha256": "033cec9933b9e91e5afa60fec803261877feacf2c2c6a9703b38e1b1bbbb598d",
+      "bytes": 298833
+    },
+    "nav.png": {
+      "sha256": "03458a71a88f612424f2c763a22abf1dabd201f994454370a22ae71aa4a00f89",
+      "bytes": 945087
+    },
+    "risk_and_exposure.png": {
+      "sha256": "8168a3991ce6d3bb777ed7bcf96e4336040617c51cd31c056ef4f82b03cfbb0f",
+      "bytes": 536829
+    },
+    "risk_scores.csv": {
+      "sha256": "9710b15eb6d3b84bf982a908543565cbb3d7e8e587a679a20ad2f6aa8ac19778",
+      "bytes": 4982707
+    },
+    "robustness.csv": {
+      "sha256": "9319f04795ed49d26cc3261e7df499460972036f694d89013e25cf43d6c7e935",
+      "bytes": 6162
+    },
+    "stress_events.csv": {
+      "sha256": "d2b3de54464e188eab57b55067b6fdd485f44a745dd6dfcf14b933669474ae56",
+      "bytes": 134425
+    },
+    "walk_forward_folds.csv": {
+      "sha256": "dd64fda91004948fa0a0453791aa733cc72dec095727229e3f364de77f820bd6",
+      "bytes": 2572
+    }
+  }
+}
