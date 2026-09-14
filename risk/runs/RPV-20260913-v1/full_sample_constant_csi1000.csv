@@ -1,2 +1,0 @@
-﻿strategy,CAGR,Max Drawdown,Calmar Ratio,Sharpe Ratio,Annualized Volatility,Worst Year Return,Recovery Time,Recovery Status,Average Exposure,Exposure Changes,Turnover,index_id,index_name,matched_exposure
-Constant Exposure - Full Sample,0.014147357798192317,0.319654438264685,0.04425828677679054,0.17149333469817224,0.15809302541796744,-0.24660440808549278,992,recovered,0.6307548011367554,0,5.828765683364441,CSI1000,中证1000,0.6305873782750995
