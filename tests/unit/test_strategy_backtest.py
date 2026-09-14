@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 
+import duckdb
 import pytest
 from pydantic import ValidationError
 
 from alpha_research_os.portfolio.strategy_backtest import (
     StrategyBacktestRequest,
+    _is_pit_abnormal_security,
+    _market_rows,
     _maximum_drawdown_period,
     _post_trade_exposure,
+    _prefetch_market_rows,
     _sell_order_quantity,
     _target_share_quantity,
     select_portfolio,
@@ -17,6 +22,78 @@ from scripts.serve_strategy_backtest_api import StrategyJobManager
 
 DIGEST_A = "sha256:" + "a" * 64
 DIGEST_B = "sha256:" + "b" * 64
+
+
+def _market_connection() -> duckdb.DuckDBPyConnection:
+    connection = duckdb.connect(":memory:")
+    connection.execute("CREATE SCHEMA research")
+    connection.execute("CREATE SCHEMA raw")
+    connection.execute(
+        """CREATE TABLE research.security_session_state(
+        trade_date DATE, ts_code VARCHAR, security_name VARCHAR, name_is_point_in_time BOOLEAN,
+        is_suspended BOOLEAN, is_st BOOLEAN, delist_date DATE)"""
+    )
+    connection.execute(
+        """CREATE TABLE research.market_daily(
+        trade_date DATE, ts_code VARCHAR, open DOUBLE, close DOUBLE,
+        amount_cny DOUBLE, is_tradeable_bar BOOLEAN)"""
+    )
+    connection.execute(
+        "CREATE TABLE research.adj_factor(trade_date DATE, ts_code VARCHAR, adj_factor DOUBLE)"
+    )
+    connection.execute(
+        """CREATE TABLE raw.m2e_stk_limit(
+        trade_date DATE, ts_code VARCHAR, up_limit DOUBLE, down_limit DOUBLE)"""
+    )
+    connection.execute(
+        """CREATE TABLE research.corporate_action_reconciliation_approved(
+        effective_date DATE, ts_code VARCHAR, stock_dividend_ratio DOUBLE,
+        cash_dividend_per_share DOUBLE)"""
+    )
+    return connection
+
+
+def test_market_rows_keep_pricing_a_holding_after_it_leaves_signal_universe() -> None:
+    connection = _market_connection()
+    session = date(2025, 1, 2)
+    connection.execute(
+        "INSERT INTO research.security_session_state VALUES (?, '600365.SH', 'ST stock', true, false, true, NULL)",
+        [session],
+    )
+    connection.execute(
+        "INSERT INTO research.market_daily VALUES (?, '600365.SH', 8.0, 8.5, 1000000, true)",
+        [session],
+    )
+
+    rows = _market_rows(connection, session, {"600365.SH"})
+
+    assert rows["600365.SH"]["open"] == 8.0
+    assert rows["600365.SH"]["close"] == 8.5
+    assert rows["600365.SH"]["tradeable"] is True
+
+
+def test_prefetch_keeps_delist_session_without_a_market_bar() -> None:
+    connection = _market_connection()
+    final_trade = date(2025, 1, 2)
+    delist_session = date(2025, 1, 3)
+    connection.executemany(
+        "INSERT INTO research.security_session_state VALUES (?, '000585.SZ', 'delisting stock', true, ?, false, ?)",
+        [
+            [final_trade, False, delist_session],
+            [delist_session, False, delist_session],
+        ],
+    )
+    connection.execute(
+        "INSERT INTO research.market_daily VALUES (?, '000585.SZ', 2.0, 2.1, 1000000, true)",
+        [final_trade],
+    )
+    cache: dict[str, dict[date, dict[str, object]]] = {}
+
+    _prefetch_market_rows(connection, final_trade, delist_session, {"000585.SZ"}, cache)
+
+    assert cache["000585.SZ"][final_trade]["close"] == 2.1
+    assert cache["000585.SZ"][delist_session]["close"] is None
+    assert cache["000585.SZ"][delist_session]["delist_date"] == delist_session
 
 
 def test_post_trade_exposure_uses_total_account_equity() -> None:
@@ -34,6 +111,39 @@ def test_post_trade_exposure_uses_total_account_equity() -> None:
         "post_security_weight": 0.25,
         "post_total_position_weight": 0.5,
     }
+
+
+@pytest.mark.parametrize("name", ["*欣泰", "*ST示例", "ST示例", "示例退", "退市整理示例"])
+def test_pit_abnormal_security_uses_same_session_name(name: str) -> None:
+    assert _is_pit_abnormal_security(name) is True
+
+
+def test_current_snapshot_name_is_not_used_as_historical_status() -> None:
+    assert _is_pit_abnormal_security("欣泰电气(退)", False, False) is False
+
+
+def test_selection_excludes_pit_abnormal_name_without_future_delist_data() -> None:
+    request = _request(filter_rules=[], target_count=1, retention_rank=1)
+    rows = [
+        {
+            "ts_code": "300372.SZ",
+            "security_name": "*欣泰",
+            "is_st": False,
+            "listed_session_number": 500,
+            "factor_values": {("value", DIGEST_A): 10.0},
+        },
+        {
+            "ts_code": "000001.SZ",
+            "security_name": "平安银行",
+            "is_st": False,
+            "listed_session_number": 500,
+            "factor_values": {("value", DIGEST_A): 5.0},
+        },
+    ]
+
+    result = select_portfolio(rows, request)
+
+    assert [item["ts_code"] for item in result["holdings"]] == ["000001.SZ"]
 
 
 def _request(**updates: object) -> StrategyBacktestRequest:

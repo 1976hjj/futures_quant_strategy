@@ -6,7 +6,11 @@ import pandas as pd
 import pytest
 from pydantic import ValidationError
 
-from alpha_research_os.portfolio.risk_overlay import RiskOverlaySpec, build_exposure_schedule
+from alpha_research_os.portfolio.risk_overlay import (
+    RiskOverlaySpec,
+    build_exposure_schedule,
+    build_rolling_kelly_schedule,
+)
 
 
 def _frame(exposures: list[float], scores: list[float] | None = None) -> pd.DataFrame:
@@ -116,3 +120,39 @@ def test_r7_uses_configured_fixed_exposure_without_changes() -> None:
     assert initial == .65
     assert schedule == {}
     assert changes == []
+
+
+def test_r8_rolling_kelly_uses_only_returns_available_on_signal_day() -> None:
+    sessions = pd.bdate_range("2025-01-02", periods=32)
+    returns = [0.0] + [0.05] * 18 + [-0.40, 0.10] + [-0.20] + [0.01] * 10
+    daily = [
+        {"session": session.date().isoformat(), "daily_return": value}
+        for session, value in zip(sessions, returns, strict=True)
+    ]
+    spec = RiskOverlaySpec(
+        experiment_variant="R8",
+        kelly_lookback_sessions=20,
+        kelly_min_sessions=20,
+        kelly_update_sessions=10,
+        kelly_fraction=1,
+        kelly_initial_exposure=.65,
+        kelly_drawdown_limit=.20,
+        kelly_exposure_step=.05,
+    )
+
+    initial, schedule, changes = build_rolling_kelly_schedule(daily, spec)
+
+    first_signal = sessions[20].date()
+    assert initial == .65
+    assert schedule[first_signal] == pytest.approx(.5)
+    assert changes[0]["observations"] == 20
+    assert changes[0]["historical_maximum_drawdown"] == pytest.approx(-.4)
+    assert changes[0]["drawdown_cap"] == pytest.approx(.5)
+    assert changes[0]["signal_session"] == first_signal.isoformat()
+
+
+def test_r8_parameters_reject_inconsistent_history_and_exposure_bounds() -> None:
+    with pytest.raises(ValidationError, match="minimum history"):
+        RiskOverlaySpec(kelly_lookback_sessions=20, kelly_min_sessions=21)
+    with pytest.raises(ValidationError, match="minimum exposure"):
+        RiskOverlaySpec(kelly_min_exposure=.8, kelly_max_exposure=.7)

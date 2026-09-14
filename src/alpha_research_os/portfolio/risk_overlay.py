@@ -8,6 +8,7 @@ import math
 import os
 from datetime import date
 from pathlib import Path
+from statistics import fmean, pvariance
 from typing import Literal
 
 import duckdb
@@ -56,7 +57,7 @@ def default_levels() -> tuple[RiskLevel, ...]:
 
 
 class RiskOverlaySpec(FrozenSpec):
-    experiment_variant: Literal["R0", "R1", "R2", "R3", "R4", "R5", "R6", "R7"] = "R0"
+    experiment_variant: Literal["R0", "R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8"] = "R0"
     market_scope: Literal["ALL_A_EQUAL_WEIGHT_PIT"] = "ALL_A_EQUAL_WEIGHT_PIT"
     weights: RiskWeights = Field(default_factory=RiskWeights)
     levels: tuple[RiskLevel, ...] = Field(default_factory=default_levels)
@@ -74,6 +75,15 @@ class RiskOverlaySpec(FrozenSpec):
     hysteresis_score: float = Field(default=3.0, ge=0, le=20)
     train_lookback_sessions: int = Field(default=756, ge=20, le=2520)
     fixed_exposure: float = Field(default=0.65, ge=0, le=1)
+    kelly_lookback_sessions: int = Field(default=756, ge=20, le=2520)
+    kelly_min_sessions: int = Field(default=252, ge=20, le=1260)
+    kelly_update_sessions: int = Field(default=63, ge=1, le=252)
+    kelly_fraction: float = Field(default=0.50, gt=0, le=1)
+    kelly_initial_exposure: float = Field(default=0.65, ge=0, le=1)
+    kelly_min_exposure: float = Field(default=0.20, ge=0, le=1)
+    kelly_max_exposure: float = Field(default=1.00, ge=0, le=1)
+    kelly_drawdown_limit: float = Field(default=0.30, gt=0, le=1)
+    kelly_exposure_step: float = Field(default=0.05, gt=0, le=1)
     cash_annual_yield: float = Field(default=0.0, ge=0, le=0.20)
 
     @model_validator(mode="after")
@@ -91,7 +101,92 @@ class RiskOverlaySpec(FrozenSpec):
                 raise ValueError("higher risk levels cannot have higher exposure")
         if self.levels[0].score_min != 0 or self.levels[-1].score_max != 100:
             raise ValueError("risk levels must cover score zero through one hundred")
+        if self.kelly_min_sessions > self.kelly_lookback_sessions:
+            raise ValueError("Kelly minimum history cannot exceed its lookback")
+        if self.kelly_min_exposure > self.kelly_max_exposure:
+            raise ValueError("Kelly minimum exposure cannot exceed its maximum")
+        if not self.kelly_min_exposure <= self.kelly_initial_exposure <= self.kelly_max_exposure:
+            raise ValueError("Kelly initial exposure must stay inside its minimum and maximum")
         return self
+
+
+def _realized_maximum_drawdown(returns: list[float]) -> float:
+    wealth = 1.0
+    peak = 1.0
+    maximum_drawdown = 0.0
+    for value in returns:
+        wealth *= 1 + value
+        peak = max(peak, wealth)
+        maximum_drawdown = min(maximum_drawdown, wealth / peak - 1)
+    return maximum_drawdown
+
+
+def build_rolling_kelly_schedule(
+    daily: list[dict[str, object]],
+    spec: RiskOverlaySpec,
+) -> tuple[float, dict[date, float], list[dict[str, object]]]:
+    """Estimate fractional Kelly from trailing R0 returns for the next session.
+
+    Each observation available through signal day T may be used.  The caller
+    applies the resulting target on T+1.  A trailing drawdown cap and exposure
+    step make the unconstrained Kelly estimate usable as a long-only risk
+    budget rather than a leverage recommendation.
+    """
+    initial = spec.kelly_initial_exposure
+    schedule: dict[date, float] = {}
+    changes: list[dict[str, object]] = []
+    previous = initial
+    cash_daily_return = (1 + spec.cash_annual_yield) ** (1 / 252) - 1
+    realized_returns = [float(row["daily_return"]) for row in daily]
+
+    first_signal_index = spec.kelly_min_sessions
+    for index in range(first_signal_index, len(daily) - 1, spec.kelly_update_sessions):
+        start_index = max(1, index - spec.kelly_lookback_sessions + 1)
+        trailing = realized_returns[start_index:index + 1]
+        if len(trailing) < spec.kelly_min_sessions:
+            continue
+        mean_return = fmean(trailing)
+        variance = pvariance(trailing)
+        excess_mean = mean_return - cash_daily_return
+        if variance > 0:
+            raw_kelly = max(0.0, excess_mean / variance)
+        else:
+            raw_kelly = spec.kelly_max_exposure if excess_mean > 0 else 0.0
+        fractional_kelly = raw_kelly * spec.kelly_fraction
+        historical_drawdown = _realized_maximum_drawdown(trailing)
+        drawdown_cap = (
+            spec.kelly_drawdown_limit / abs(historical_drawdown)
+            if historical_drawdown < 0
+            else spec.kelly_max_exposure
+        )
+        unconstrained = min(fractional_kelly, drawdown_cap, spec.kelly_max_exposure)
+        stepped = math.floor((unconstrained + 1e-12) / spec.kelly_exposure_step) * spec.kelly_exposure_step
+        target = min(
+            spec.kelly_max_exposure,
+            max(spec.kelly_min_exposure, stepped),
+        )
+        target = round(target, 10)
+        signal_date = date.fromisoformat(str(daily[index]["session"]))
+        if not math.isclose(target, previous, abs_tol=1e-12):
+            schedule[signal_date] = target
+            changes.append(
+                {
+                    "signal_session": signal_date.isoformat(),
+                    "risk_score": None,
+                    "from_exposure": previous,
+                    "to_exposure": target,
+                    "to_level": None,
+                    "observations": len(trailing),
+                    "annualized_mean_return": mean_return * 252,
+                    "annualized_volatility": math.sqrt(variance * 252),
+                    "historical_maximum_drawdown": historical_drawdown,
+                    "raw_kelly": raw_kelly,
+                    "fractional_kelly": fractional_kelly,
+                    "drawdown_cap": drawdown_cap,
+                }
+            )
+            previous = target
+    return initial, schedule, changes
 
 
 def _rolling_percentile(series: pd.Series, window: int, minimum: int) -> pd.Series:
@@ -126,6 +221,9 @@ def build_risk_scores(
         for key in (
             "experiment_variant", "r3_interval_sessions", "down_confirmation_sessions",
             "up_confirmation_sessions", "hysteresis_score", "fixed_exposure", "cash_annual_yield",
+            "kelly_lookback_sessions", "kelly_min_sessions", "kelly_update_sessions",
+            "kelly_fraction", "kelly_initial_exposure", "kelly_min_exposure",
+            "kelly_max_exposure", "kelly_drawdown_limit", "kelly_exposure_step",
         ):
             score_config.pop(key, None)
         cache_key = hashlib.sha256(

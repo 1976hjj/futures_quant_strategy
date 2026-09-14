@@ -165,7 +165,11 @@ class StrategyJobManager:
             runner = "scripts/run_rotation_backtest.py"
         else:
             request = StrategyBacktestRequest.model_validate(payload)
-            preflight(self.project_root, request)
+            # Starting a job must return promptly.  Full Risk Score validation
+            # can take minutes on a new date range and is performed inside the
+            # worker run; the explicit preflight endpoint remains available
+            # when the user wants that synchronous diagnostic first.
+            preflight(self.project_root, request, validate_risk_data=False)
             runner = "scripts/run_strategy_backtest.py"
         with self.lock:
             if self.running():

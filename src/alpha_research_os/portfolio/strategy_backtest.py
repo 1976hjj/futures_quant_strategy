@@ -6,6 +6,7 @@ import bisect
 import json
 import math
 import os
+import re
 import threading
 from collections.abc import Callable
 from datetime import date, datetime
@@ -31,6 +32,7 @@ from alpha_research_os.portfolio.risk_overlay import (
     RiskOverlaySpec,
     build_exposure_schedule,
     build_risk_scores,
+    build_rolling_kelly_schedule,
 )
 
 
@@ -68,6 +70,7 @@ class StrategyBacktestRequest(FrozenSpec):
     score_rules: tuple[ScoreRule, ...] = Field(min_length=1, max_length=12)
     filter_rules: tuple[FilterRule, ...] = Field(default=(), max_length=12)
     exclude_st: bool = True
+    exclude_abnormal_status: bool = True
     minimum_listed_sessions: int = Field(default=60, ge=0, le=1250)
     target_count: int = Field(default=50, ge=1, le=500)
     retention_rank: int = Field(default=75, ge=1, le=1000)
@@ -97,6 +100,11 @@ class StrategyBacktestRequest(FrozenSpec):
             raise ValueError("score factors must be unique")
         if len({rule.factor_id for rule in self.filter_rules}) != len(self.filter_rules):
             raise ValueError("filter factors must be unique")
+        if (
+            self.risk_overlay.experiment_variant == "R8"
+            and self.selection_sequence_mode != "MODEL_TARGETS"
+        ):
+            raise ValueError("R8 requires the shared model target selection sequence")
         return self
 
     @property
@@ -240,6 +248,12 @@ def preflight(
                 "initial_exposure": request.risk_overlay.fixed_exposure,
                 "scheduled_changes": 0,
             }
+        elif validate_risk_data and request.risk_overlay.experiment_variant == "R8":
+            risk_check = {
+                "initial_exposure": request.risk_overlay.kelly_initial_exposure,
+                "scheduled_changes": None,
+                "calculation": "ROLLING_R0_RETURNS_AT_RUNTIME",
+            }
         elif validate_risk_data and request.risk_overlay.experiment_variant != "R0":
             risk_frame = build_risk_scores(
                 connection,
@@ -299,6 +313,21 @@ def _percentiles(values: dict[str, float], high_is_good: bool) -> dict[str, floa
     return result
 
 
+def _is_pit_abnormal_security(
+    security_name: object,
+    is_st: object = False,
+    name_is_point_in_time: object = True,
+) -> bool:
+    """Recognize only the security status publicly visible on that session."""
+    if bool(is_st):
+        return True
+    if not bool(name_is_point_in_time):
+        return False
+    name = str(security_name or "").strip().upper().replace(" ", "")
+    status_prefix = re.match(r"^(S\*ST|\*ST|ST|SST|PT)(?![A-Z])", name) is not None
+    return name.startswith("*") or status_prefix or "退" in name
+
+
 def _signal_rows(
     connection: duckdb.DuckDBPyConnection,
     resolved: list[dict[str, Any]],
@@ -327,7 +356,8 @@ def _signal_rows(
         ).fetchall()
     else:
         rows = connection.execute(
-            f"""SELECT u.ts_code, u.security_name, u.is_st, u.listed_session_number,
+            f"""SELECT u.ts_code, u.security_name, u.name_is_point_in_time,
+            u.is_st, u.listed_session_number,
             {', '.join(values)} FROM research.universe_daily u {' '.join(joins)}
             WHERE u.trade_date=? AND u.eligible_for_signal ORDER BY u.ts_code""",
             [signal_date],
@@ -392,7 +422,8 @@ def _prepare_signal_table(
     try:
         connection.execute(
             f"""CREATE OR REPLACE TEMP TABLE strategy_signal_values AS
-            SELECT u.trade_date, u.ts_code, u.security_name, u.is_st, u.listed_session_number,
+            SELECT u.trade_date, u.ts_code, u.security_name, u.name_is_point_in_time,
+            u.is_st, u.listed_session_number,
             {', '.join(values)} FROM research.universe_daily u {' '.join(joins)}
             WHERE u.eligible_for_signal AND u.trade_date IN ({dates})"""
         )
@@ -427,7 +458,7 @@ def _signal_cache_path(
     fingerprint = warehouse.stat()
     cache_key = content_hash(
         {
-            "schema": "strategy-signal-cache-v1",
+            "schema": "strategy-signal-cache-v2",
             "factors": [
                 {"factor_id": item["factor_id"], "release_id": item["release_id"]}
                 for item in resolved
@@ -454,6 +485,14 @@ def select_portfolio(
         row
         for row in rows
         if (not request.exclude_st or not row["is_st"])
+        and (
+            not request.exclude_abnormal_status
+            or not _is_pit_abnormal_security(
+                row.get("security_name"),
+                row.get("is_st"),
+                row.get("name_is_point_in_time", True),
+            )
+        )
         and (row["listed_session_number"] or 0) >= request.minimum_listed_sessions
         and not (
             industry_by_code is not None
@@ -606,10 +645,11 @@ def _market_rows(
         return {}
     placeholders = ",".join("?" for _ in securities)
     rows = connection.execute(
-        f"""SELECT u.ts_code, u.security_name, m.open, m.close, m.amount_cny, m.is_tradeable_bar,
-        u.is_suspended, a.adj_factor, l.up_limit, l.down_limit, u.delist_date,
+        f"""SELECT u.ts_code, u.security_name, u.name_is_point_in_time,
+        m.open, m.close, m.amount_cny, m.is_tradeable_bar,
+        u.is_suspended, u.is_st, a.adj_factor, l.up_limit, l.down_limit, u.delist_date,
         ca.stock_dividend_ratio, ca.cash_dividend_per_share
-        FROM research.universe_daily u
+        FROM research.security_session_state u
         LEFT JOIN research.market_daily m USING (trade_date, ts_code)
         LEFT JOIN research.adj_factor a USING (trade_date, ts_code)
         LEFT JOIN raw.m2e_stk_limit l USING (trade_date, ts_code)
@@ -619,7 +659,8 @@ def _market_rows(
         [session, *sorted(securities)],
     ).fetchall()
     names = (
-        "ts_code", "security_name", "open", "close", "amount", "tradeable", "suspended", "adj", "up", "down",
+        "ts_code", "security_name", "name_is_point_in_time", "open", "close", "amount",
+        "tradeable", "suspended", "is_st", "adj", "up", "down",
         "delist_date", "stock_dividend_ratio", "cash_dividend_per_share",
     )
     return {
@@ -639,7 +680,10 @@ def _prefetch_market_rows(
 
     The account simulation itself deliberately remains sequential: cash and holdings
     on day N are inputs to day N+1.  What is independent is the database lookup of
-    each selected security's future daily bars.  Keeping the cache keyed by security
+    each selected security's future daily bars.  Market rows must come from the full
+    listed-security state rather than the signal-eligible universe: an existing
+    holding still needs current marks and a sell path after it becomes ST, suspended,
+    or otherwise ineligible for a new signal.  Keeping the cache keyed by security
     also lets us evict names once they are no longer held or pending, bounding memory
     use to the live portfolio rather than the whole universe.
     """
@@ -647,10 +691,11 @@ def _prefetch_market_rows(
         return
     placeholders = ",".join("?" for _ in securities)
     rows = connection.execute(
-        f"""SELECT u.ts_code, u.trade_date, u.security_name, m.open, m.close, m.amount_cny, m.is_tradeable_bar,
-        u.is_suspended, a.adj_factor, l.up_limit, l.down_limit, u.delist_date,
+        f"""SELECT u.ts_code, u.trade_date, u.security_name, u.name_is_point_in_time,
+        m.open, m.close, m.amount_cny, m.is_tradeable_bar,
+        u.is_suspended, u.is_st, a.adj_factor, l.up_limit, l.down_limit, u.delist_date,
         ca.stock_dividend_ratio, ca.cash_dividend_per_share
-        FROM research.universe_daily u
+        FROM research.security_session_state u
         LEFT JOIN research.market_daily m USING (trade_date, ts_code)
         LEFT JOIN research.adj_factor a USING (trade_date, ts_code)
         LEFT JOIN raw.m2e_stk_limit l USING (trade_date, ts_code)
@@ -660,7 +705,8 @@ def _prefetch_market_rows(
         [start, end, *sorted(securities)],
     ).fetchall()
     names = (
-        "ts_code", "trade_date", "security_name", "open", "close", "amount", "tradeable", "suspended", "adj", "up",
+        "ts_code", "trade_date", "security_name", "name_is_point_in_time", "open", "close",
+        "amount", "tradeable", "suspended", "is_st", "adj", "up",
         "down", "delist_date", "stock_dividend_ratio", "cash_dividend_per_share",
     )
     for row in rows:
@@ -842,6 +888,28 @@ def run_backtest(
     resolved = _resolve_inputs(project_root, request)
     request = _effective_request(request, resolved)
     database = project_root / "data" / "warehouse" / "alpha_research.duckdb"
+    kelly_source_result: dict[str, Any] | None = None
+    if request.risk_overlay.experiment_variant == "R8":
+        if progress_callback:
+            progress_callback({"phase": "准备滚动凯利基准收益", "progress": 7})
+        shadow_request = request.model_copy(
+            update={
+                "name": f"{request.name} · R8凯利基准",
+                "risk_overlay": request.risk_overlay.model_copy(
+                    update={"experiment_variant": "R0"}
+                ),
+            }
+        )
+        kelly_source_result = run_backtest(
+            project_root,
+            shadow_request,
+            None,
+            market_data_mode=market_data_mode,
+            target_schedule=target_schedule,
+            include_selection_history=False,
+            maximum_industry_weight=maximum_industry_weight,
+            missing_industry_policy=missing_industry_policy,
+        )
     execution = DailyBarExecutionSpec(
         buy_commission_bps=request.buy_commission_bps,
         sell_commission_bps=request.sell_commission_bps,
@@ -871,6 +939,12 @@ def run_backtest(
         risk_changes: list[dict[str, object]] = []
         if request.risk_overlay.experiment_variant == "R7":
             initial_risk_exposure = request.risk_overlay.fixed_exposure
+        elif request.risk_overlay.experiment_variant == "R8":
+            if kelly_source_result is None:
+                raise RuntimeError("R8 Kelly source result was not prepared")
+            initial_risk_exposure, risk_schedule, risk_changes = build_rolling_kelly_schedule(
+                kelly_source_result["daily"], request.risk_overlay
+            )
         elif request.risk_overlay.experiment_variant != "R0":
             risk_frame = build_risk_scores(
                 connection,
@@ -882,9 +956,9 @@ def run_backtest(
             initial_risk_exposure, risk_schedule, risk_changes = build_exposure_schedule(
                 risk_frame, request.risk_overlay, request.start, request.end
             )
+        if risk_changes:
             next_session_by_signal = {
-                session: sessions[index + 1]
-                for index, session in enumerate(sessions[:-1])
+                session: sessions[index + 1] for index, session in enumerate(sessions[:-1])
             }
             for change in risk_changes:
                 signal_session = date.fromisoformat(str(change["signal_session"]))
@@ -954,6 +1028,7 @@ def run_backtest(
         rebalance_count = 0
         delisting_liquidations = 0
         market_cache: dict[str, dict[date, dict[str, Any]]] = {}
+        forced_exit_codes: set[str] = set()
 
         for session_index, session in enumerate(sessions, start=1):
             day_cash_interest = 0.0
@@ -962,7 +1037,7 @@ def run_backtest(
                 day_cash_interest = _cash(cash * daily_cash_rate)
                 cash = _cash(cash + day_cash_interest)
             target_set = set(pending_target or [])
-            relevant = set(positions) | target_set
+            relevant = set(positions) | target_set | forced_exit_codes
             if market_data_mode == "legacy":
                 bars = _market_rows(connection, session, relevant)
             else:
@@ -1000,6 +1075,92 @@ def run_backtest(
             day_notional = 0.0
             day_cost = 0.0
 
+            def execute_sell(
+                code: str,
+                quantity: int,
+                execution_reason: str | None = None,
+                *,
+                market_rows: dict[str, dict[str, Any]],
+                trade_session: date,
+                marks: dict[str, float],
+                rebalance_id: int,
+            ) -> bool:
+                nonlocal cash, day_notional, day_cost, total_realized_pnl, trade_attempt_count
+                if quantity <= 0 or code not in positions:
+                    return False
+                bar = market_rows.get(code, {})
+                fill = simulate_daily_bar_fill(
+                    OrderIntent(side=OrderSide.SELL, quantity=quantity),
+                    DailyBarLiquidity(
+                        reference_price=bar.get("open"), traded_amount_cny=bar.get("amount"),
+                        up_limit=bar.get("up"), down_limit=bar.get("down"),
+                        is_suspended=bool(bar.get("suspended", True)),
+                        is_tradeable_bar=bool(bar.get("tradeable", False)),
+                    ),
+                    execution,
+                    trade_session,
+                )
+                trade_attempt_count += 1
+                if fill.status is not FillStatus.FILLED or fill.fill_price is None:
+                    rejection_counts[fill.status.value] = rejection_counts.get(fill.status.value, 0) + 1
+                    return False
+                current_quantity = positions[code]
+                sold = min(current_quantity, quantity)
+                proceeds = _cash(sold * fill.fill_price)
+                allocated_cost = _cash(position_costs.get(code, 0.0) * sold / current_quantity)
+                allocated_dividend = _cash(
+                    position_dividends.get(code, 0.0) * sold / current_quantity
+                )
+                trading_pnl = _cash(proceeds - fill.total_cost_cny - allocated_cost)
+                realized_pnl = _cash(trading_pnl + allocated_dividend)
+                realized_pnl_pct = realized_pnl / allocated_cost if allocated_cost else None
+                positions[code] -= sold
+                position_costs[code] = _cash(position_costs.get(code, 0.0) - allocated_cost)
+                position_dividends[code] = _cash(
+                    position_dividends.get(code, 0.0) - allocated_dividend
+                )
+                if positions[code] == 0:
+                    positions.pop(code)
+                    position_costs.pop(code, None)
+                    position_dividends.pop(code, None)
+                cash = _cash(cash + proceeds - fill.total_cost_cny)
+                marks[code] = fill.fill_price
+                day_notional = _cash(day_notional + proceeds)
+                day_cost = _cash(day_cost + fill.total_cost_cny)
+                total_realized_pnl = _cash(total_realized_pnl + realized_pnl)
+                trade = {
+                    "session": trade_session.isoformat(), "rebalance_id": rebalance_id,
+                    "ts_code": code, "security_name": bar.get("security_name") or code,
+                    "side": "SELL", "quantity": sold, "price": fill.fill_price,
+                    "amount_cny": proceeds, "commission_cny": fill.commission_cny,
+                    "stamp_duty_cny": fill.stamp_duty_cny,
+                    "transfer_fee_cny": fill.transfer_fee_cny,
+                    "total_cost_cny": fill.total_cost_cny,
+                    "cost_basis_cny": allocated_cost,
+                    "allocated_dividend_cny": allocated_dividend,
+                    "trading_realized_pnl_cny": trading_pnl,
+                    "realized_pnl_cny": realized_pnl,
+                    "realized_pnl_pct": realized_pnl_pct,
+                    "post_quantity": positions.get(code, 0),
+                    **_post_trade_exposure(positions, cash, marks, code),
+                }
+                if execution_reason is not None:
+                    trade["execution_reason"] = execution_reason
+                trades.append(trade)
+                return code not in positions
+
+            for code in sorted(forced_exit_codes & set(positions)):
+                if execute_sell(
+                    code,
+                    positions[code],
+                    "PIT_ABNORMAL_STATUS_FORCED_EXIT",
+                    market_rows=bars,
+                    trade_session=session,
+                    marks=intraday_marks,
+                    rebalance_id=rebalance_count,
+                ):
+                    forced_exit_codes.discard(code)
+
             if pending_target is not None:
                 if pending_risk_exposure is not None:
                     current_risk_exposure = pending_risk_exposure
@@ -1016,71 +1177,29 @@ def run_backtest(
                 sell_orders = {
                     code: _sell_order_quantity(code, quantity, target_quantities.get(code, 0))
                     for code, quantity in positions.items()
+                    if code not in forced_exit_codes
                 }
                 for code, quantity in sorted(sell_orders.items()):
-                    if quantity <= 0:
-                        continue
-                    bar = bars.get(code, {})
-                    fill = simulate_daily_bar_fill(
-                        OrderIntent(side=OrderSide.SELL, quantity=quantity),
-                        DailyBarLiquidity(
-                            reference_price=bar.get("open"), traded_amount_cny=bar.get("amount"),
-                            up_limit=bar.get("up"), down_limit=bar.get("down"),
-                            is_suspended=bool(bar.get("suspended", True)),
-                            is_tradeable_bar=bool(bar.get("tradeable", False)),
-                        ),
-                        execution,
-                        session,
+                    execute_sell(
+                        code,
+                        quantity,
+                        market_rows=bars,
+                        trade_session=session,
+                        marks=intraday_marks,
+                        rebalance_id=rebalance_count,
                     )
-                    trade_attempt_count += 1
-                    if fill.status is FillStatus.FILLED and fill.fill_price is not None:
-                        current_quantity = positions[code]
-                        sold = min(current_quantity, quantity)
-                        proceeds = _cash(sold * fill.fill_price)
-                        allocated_cost = _cash(position_costs.get(code, 0.0) * sold / current_quantity)
-                        allocated_dividend = _cash(
-                            position_dividends.get(code, 0.0) * sold / current_quantity
-                        )
-                        trading_pnl = _cash(proceeds - fill.total_cost_cny - allocated_cost)
-                        realized_pnl = _cash(trading_pnl + allocated_dividend)
-                        realized_pnl_pct = realized_pnl / allocated_cost if allocated_cost else None
-                        positions[code] -= sold
-                        position_costs[code] = _cash(position_costs.get(code, 0.0) - allocated_cost)
-                        position_dividends[code] = _cash(
-                            position_dividends.get(code, 0.0) - allocated_dividend
-                        )
-                        if positions[code] == 0:
-                            positions.pop(code)
-                            position_costs.pop(code, None)
-                            position_dividends.pop(code, None)
-                        cash = _cash(cash + proceeds - fill.total_cost_cny)
-                        intraday_marks[code] = fill.fill_price
-                        day_notional = _cash(day_notional + proceeds)
-                        day_cost = _cash(day_cost + fill.total_cost_cny)
-                        total_realized_pnl = _cash(total_realized_pnl + realized_pnl)
-                        trades.append(
-                            {
-                                "session": session.isoformat(), "rebalance_id": rebalance_count,
-                                "ts_code": code, "security_name": bar.get("security_name") or code,
-                                "side": "SELL", "quantity": sold, "price": fill.fill_price,
-                                "amount_cny": proceeds, "commission_cny": fill.commission_cny,
-                                "stamp_duty_cny": fill.stamp_duty_cny,
-                                "transfer_fee_cny": fill.transfer_fee_cny,
-                                "total_cost_cny": fill.total_cost_cny,
-                                "cost_basis_cny": allocated_cost,
-                                "allocated_dividend_cny": allocated_dividend,
-                                "trading_realized_pnl_cny": trading_pnl,
-                                "realized_pnl_cny": realized_pnl,
-                                "realized_pnl_pct": realized_pnl_pct,
-                                "post_quantity": positions.get(code, 0),
-                                **_post_trade_exposure(positions, cash, intraday_marks, code),
-                            }
-                        )
-                    else:
-                        rejection_counts[fill.status.value] = rejection_counts.get(fill.status.value, 0) + 1
 
                 for code in pending_target:
                     bar = bars.get(code, {})
+                    if request.exclude_abnormal_status and _is_pit_abnormal_security(
+                        bar.get("security_name"),
+                        bar.get("is_st"),
+                        bar.get("name_is_point_in_time", True),
+                    ):
+                        rejection_counts["PIT_ABNORMAL_STATUS"] = (
+                            rejection_counts.get("PIT_ABNORMAL_STATUS", 0) + 1
+                        )
+                        continue
                     desired = _buy_order_quantity(
                         code, target_quantities.get(code, 0) - positions.get(code, 0)
                     )
@@ -1155,8 +1274,13 @@ def run_backtest(
             for code, quantity in list(positions.items()):
                 bar = bars.get(code, {})
                 close_price = float(bar.get("close") or 0)
-                if bar.get("delist_date") == session and close_price > 0:
-                    proceeds = _cash(quantity * close_price)
+                if bar.get("delist_date") == session:
+                    # A-share delist dates commonly have no market bar.  Settle the
+                    # position at the final observable close instead of carrying an
+                    # untradeable security forever at a stale mark.  The explicit
+                    # execution reason keeps this accounting assumption auditable.
+                    liquidation_price = close_price or last_marks.get(code, 0.0)
+                    proceeds = _cash(quantity * liquidation_price)
                     allocated_cost = position_costs.get(code, 0.0)
                     allocated_dividend = position_dividends.get(code, 0.0)
                     trading_pnl = _cash(proceeds - allocated_cost)
@@ -1173,7 +1297,7 @@ def run_backtest(
                         {
                             "session": session.isoformat(), "rebalance_id": rebalance_count,
                             "ts_code": code, "security_name": bar.get("security_name") or code,
-                            "side": "SELL", "quantity": quantity, "price": close_price,
+                            "side": "SELL", "quantity": quantity, "price": liquidation_price,
                             "amount_cny": proceeds, "commission_cny": 0.0,
                             "stamp_duty_cny": 0.0, "transfer_fee_cny": 0.0,
                             "total_cost_cny": 0.0, "cost_basis_cny": allocated_cost,
@@ -1181,12 +1305,26 @@ def run_backtest(
                             "trading_realized_pnl_cny": trading_pnl,
                             "realized_pnl_cny": realized_pnl,
                             "realized_pnl_pct": realized_pnl / allocated_cost if allocated_cost else None,
-                            "post_quantity": 0, "execution_reason": "DELISTING_LIQUIDATION",
+                            "post_quantity": 0,
+                            "execution_reason": (
+                                "DELISTING_LIQUIDATION"
+                                if close_price > 0
+                                else "DELISTING_LIQUIDATION_LAST_MARK"
+                            ),
                             **_post_trade_exposure(positions, cash, intraday_marks, code),
                         }
                     )
                     delisting_liquidations += 1
                     continue
+                if request.exclude_abnormal_status and _is_pit_abnormal_security(
+                    bar.get("security_name"),
+                    bar.get("is_st"),
+                    bar.get("name_is_point_in_time", True),
+                ):
+                    # The status is observed at T close.  The first forced sell
+                    # attempt therefore occurs at T+1 open, and remains pending
+                    # across suspension or limit-down sessions until fillable.
+                    forced_exit_codes.add(code)
                 if close_price > 0:
                     last_marks[code] = close_price
                 else:
@@ -1415,9 +1553,23 @@ def run_backtest(
         "quarterly": quarterly,
         "sample_classification": (
             "RETROSPECTIVE_DIAGNOSTIC" if request.risk_overlay.experiment_variant == "R5"
+            else "WALK_FORWARD_POINT_IN_TIME" if request.risk_overlay.experiment_variant == "R8"
             else "HISTORICAL_DIAGNOSTIC"
         ),
     }
+    if request.risk_overlay.experiment_variant == "R8":
+        if kelly_source_result is None:
+            raise RuntimeError("R8 Kelly source result is unavailable")
+        source_sequence = kelly_source_result["selection_sequence"]
+        if source_sequence["fingerprint"] != result["selection_sequence"]["fingerprint"]:
+            raise RuntimeError("R8 Kelly source and execution selection sequences differ")
+        result["risk_overlay"]["kelly_source"] = {
+            "experiment_variant": "R0",
+            "run_id": kelly_source_result["run_id"],
+            "selection_fingerprint": source_sequence["fingerprint"],
+            "return_basis": "R0_CONTINUOUS_ACCOUNT_NET_RETURNS",
+            "timing": "T_CLOSE_ESTIMATE_T_PLUS_1_OPEN_EXECUTION",
+        }
     if include_selection_history:
         result["selection_history"] = selection_history
     return result
