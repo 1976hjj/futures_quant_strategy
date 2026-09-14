@@ -26,6 +26,7 @@ for import_root in (PROJECT_ROOT, SRC_ROOT):
         sys.path.insert(0, str(import_root))
 
 from alpha_research_os.kernel.canonical import canonical_json_bytes  # noqa: E402
+from alpha_research_os.portfolio.risk_overlay import RiskOverlaySpec  # noqa: E402
 from alpha_research_os.portfolio.rotation_backtest import (  # noqa: E402
     RotationBacktestRequest,
     preflight_rotation,
@@ -70,6 +71,7 @@ def strategy_options(project_root: Path) -> dict[str, Any]:
             "minimum_listed_sessions": 60,
             "initial_cash_cny": 1_000_000,
         },
+        "risk_overlay_defaults": RiskOverlaySpec().model_dump(mode="json"),
     }
 
 

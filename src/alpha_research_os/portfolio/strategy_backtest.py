@@ -27,6 +27,19 @@ from alpha_research_os.portfolio.execution import (
     OrderSide,
     simulate_daily_bar_fill,
 )
+from alpha_research_os.portfolio.risk_overlay import (
+    RiskOverlaySpec,
+    build_exposure_schedule,
+    build_risk_scores,
+)
+
+
+def _risk_score_cache_arguments(project_root: Path, database: Path) -> dict[str, Any]:
+    stat = database.stat()
+    return {
+        "cache_dir": project_root / "risk" / "cache",
+        "source_fingerprint": f"{stat.st_size}:{stat.st_mtime_ns}",
+    }
 
 
 class ScoreRule(FrozenSpec):
@@ -51,6 +64,7 @@ class StrategyBacktestRequest(FrozenSpec):
     start: date
     end: date
     universe_id: Literal["ALL-A-PIT"] = "ALL-A-PIT"
+    selection_sequence_mode: Literal["ACTUAL_POSITIONS", "MODEL_TARGETS"] = "ACTUAL_POSITIONS"
     score_rules: tuple[ScoreRule, ...] = Field(min_length=1, max_length=12)
     filter_rules: tuple[FilterRule, ...] = Field(default=(), max_length=12)
     exclude_st: bool = True
@@ -71,6 +85,7 @@ class StrategyBacktestRequest(FrozenSpec):
     square_root_impact_bps: float = Field(default=20, ge=0, le=500)
     maximum_slippage_bps: float = Field(default=100, ge=0, le=1000)
     maximum_participation_rate: float = Field(default=0.10, gt=0, le=1)
+    risk_overlay: RiskOverlaySpec = Field(default_factory=RiskOverlaySpec)
 
     @model_validator(mode="after")
     def valid_request(self) -> StrategyBacktestRequest:
@@ -198,7 +213,12 @@ def _effective_request(request: StrategyBacktestRequest, resolved: list[dict[str
     )
 
 
-def preflight(project_root: Path, request: StrategyBacktestRequest) -> dict[str, Any]:
+def preflight(
+    project_root: Path,
+    request: StrategyBacktestRequest,
+    *,
+    validate_risk_data: bool = True,
+) -> dict[str, Any]:
     resolved = _resolve_inputs(project_root, request)
     effective_request = _effective_request(request, resolved)
     common_start = max(item["start"] for item in resolved)
@@ -214,12 +234,38 @@ def preflight(project_root: Path, request: StrategyBacktestRequest) -> dict[str,
             WHERE exchange='SSE' AND is_open AND cal_date BETWEEN ? AND ?""",
             [request.start, request.end],
         ).fetchone()[0]
+        risk_check = None
+        if validate_risk_data and request.risk_overlay.experiment_variant == "R7":
+            risk_check = {
+                "initial_exposure": request.risk_overlay.fixed_exposure,
+                "scheduled_changes": 0,
+            }
+        elif validate_risk_data and request.risk_overlay.experiment_variant != "R0":
+            risk_frame = build_risk_scores(
+                connection,
+                request.start,
+                request.end,
+                request.risk_overlay,
+                **_risk_score_cache_arguments(project_root, database),
+            )
+            initial_exposure, risk_schedule, _ = build_exposure_schedule(
+                risk_frame, request.risk_overlay, request.start, request.end
+            )
+            risk_check = {
+                "initial_exposure": initial_exposure,
+                "scheduled_changes": len(risk_schedule),
+            }
     if session_count < 2:
         raise ValueError("backtest range must contain at least two trading sessions")
     warnings = ["当前区间已经用于研究，回测结果属于历史诊断。"]
     if request.rebalance_sessions == 1:
         warnings.append("每日调仓通常会放大成本影响，请重点检查净收益和换手。")
-    return {
+    if (
+        request.risk_overlay.experiment_variant != "R0"
+        and request.selection_sequence_mode == "ACTUAL_POSITIONS"
+    ):
+        warnings.append("实际持仓序列会受到成交结果影响，不适合用于跨仓位实验的纯对照。")
+    result = {
         "status": "READY",
         "config_id": effective_request.config_id,
         "common_range": {"start": common_start.isoformat(), "end": common_end.isoformat()},
@@ -228,6 +274,15 @@ def preflight(project_root: Path, request: StrategyBacktestRequest) -> dict[str,
         "estimated_rebalances": max(1, (session_count - 1) // request.rebalance_sessions),
         "warnings": warnings,
     }
+    result["risk_overlay"] = {
+        "experiment_variant": request.risk_overlay.experiment_variant,
+        "market_scope": request.risk_overlay.market_scope,
+        "execution": "T_CLOSE_SIGNAL_T_PLUS_1_OPEN",
+        "data_check": risk_check,
+    }
+    if request.risk_overlay.experiment_variant == "R5":
+        warnings.append("R5 uses the evaluation sample's average R1 exposure and is retrospective only.")
+    return result
 
 
 def _percentiles(values: dict[str, float], high_is_good: bool) -> dict[str, float]:
@@ -527,7 +582,7 @@ def _pit_industry_by_code(
 
 
 def preview(project_root: Path, request: StrategyBacktestRequest, signal_date: date) -> dict[str, Any]:
-    checked = preflight(project_root, request)
+    checked = preflight(project_root, request, validate_risk_data=False)
     if not request.start <= signal_date <= request.end:
         raise ValueError("preview date must stay inside the backtest range")
     resolved = _resolve_inputs(project_root, request)
@@ -783,7 +838,7 @@ def run_backtest(
     maximum_industry_weight: float | None = None,
     missing_industry_policy: Literal["UNKNOWN_BUCKET", "EXCLUDE"] = "UNKNOWN_BUCKET",
 ) -> dict[str, Any]:
-    checked = preflight(project_root, request)
+    checked = preflight(project_root, request, validate_risk_data=False)
     resolved = _resolve_inputs(project_root, request)
     request = _effective_request(request, resolved)
     database = project_root / "data" / "warehouse" / "alpha_research.duckdb"
@@ -810,11 +865,40 @@ def run_backtest(
                 [request.start, request.end],
             ).fetchall()
         ]
-        signal_sessions = (
+        risk_frame = None
+        initial_risk_exposure = 1.0
+        risk_schedule: dict[date, float] = {}
+        risk_changes: list[dict[str, object]] = []
+        if request.risk_overlay.experiment_variant == "R7":
+            initial_risk_exposure = request.risk_overlay.fixed_exposure
+        elif request.risk_overlay.experiment_variant != "R0":
+            risk_frame = build_risk_scores(
+                connection,
+                request.start,
+                request.end,
+                request.risk_overlay,
+                **_risk_score_cache_arguments(project_root, database),
+            )
+            initial_risk_exposure, risk_schedule, risk_changes = build_exposure_schedule(
+                risk_frame, request.risk_overlay, request.start, request.end
+            )
+            next_session_by_signal = {
+                session: sessions[index + 1]
+                for index, session in enumerate(sessions[:-1])
+            }
+            for change in risk_changes:
+                signal_session = date.fromisoformat(str(change["signal_session"]))
+                execution_session = next_session_by_signal.get(signal_session)
+                change["execution_session"] = (
+                    execution_session.isoformat() if execution_session is not None else None
+                )
+        selection_signal_sessions = (
             set(target_schedule)
             if target_schedule is not None
             else set(sessions[:: request.rebalance_sessions])
         )
+        risk_signal_sessions = set(risk_schedule)
+        signal_sessions = selection_signal_sessions | risk_signal_sessions
         invalid_schedule_dates = signal_sessions - set(sessions)
         if invalid_schedule_dates:
             raise ValueError("target schedule contains dates outside the backtest sessions")
@@ -827,7 +911,7 @@ def run_backtest(
         signal_cache = (
             None
             if target_schedule is not None
-            else _signal_cache_path(project_root, resolved, signal_sessions)
+            else _signal_cache_path(project_root, resolved, selection_signal_sessions)
         )
         if progress_callback:
             progress_callback(
@@ -842,16 +926,20 @@ def run_backtest(
                 }
             )
         if target_schedule is None:
-            _prepare_signal_table(connection, resolved, signal_sessions, signal_cache, progress_callback)
+            _prepare_signal_table(connection, resolved, selection_signal_sessions, signal_cache, progress_callback)
         if progress_callback:
             progress_callback({"phase": "连续账户回放", "progress": 18})
         positions: dict[str, int] = {}
+        model_target_holdings: set[str] = set()
         position_costs: dict[str, float] = {}
         position_dividends: dict[str, float] = {}
         last_marks: dict[str, float] = {}
         cash = request.initial_cash_cny
         pending_target: dict[str, float] | None = None
+        pending_risk_exposure: float | None = None
+        current_risk_exposure = initial_risk_exposure
         selection_history: list[dict[str, Any]] = []
+        selection_sequence_records: list[dict[str, Any]] = []
         daily: list[dict[str, Any]] = []
         # Keep only completed transactions.  Failed orders are already represented
         # in rejection_counts, while persisting each of them would needlessly grow
@@ -868,6 +956,11 @@ def run_backtest(
         market_cache: dict[str, dict[date, dict[str, Any]]] = {}
 
         for session_index, session in enumerate(sessions, start=1):
+            day_cash_interest = 0.0
+            if session_index > 1 and request.risk_overlay.experiment_variant != "R0":
+                daily_cash_rate = (1 + request.risk_overlay.cash_annual_yield) ** (1 / 252) - 1
+                day_cash_interest = _cash(cash * daily_cash_rate)
+                cash = _cash(cash + day_cash_interest)
             target_set = set(pending_target or [])
             relevant = set(positions) | target_set
             if market_data_mode == "legacy":
@@ -908,11 +1001,14 @@ def run_backtest(
             day_cost = 0.0
 
             if pending_target is not None:
+                if pending_risk_exposure is not None:
+                    current_risk_exposure = pending_risk_exposure
                 rebalance_count += 1
+                active_fraction = (1 - request.minimum_cash_fraction) * current_risk_exposure
                 target_quantities = {
                     code: _target_share_quantity(
                         code,
-                        open_nav * (1 - request.minimum_cash_fraction) * pending_target[code],
+                        open_nav * active_fraction * pending_target[code],
                         float((bars.get(code, {}).get("open") or 0) or last_marks.get(code, 0)),
                     )
                     for code in target_set
@@ -988,7 +1084,12 @@ def run_backtest(
                     desired = _buy_order_quantity(
                         code, target_quantities.get(code, 0) - positions.get(code, 0)
                     )
-                    affordable = max(0.0, cash - request.initial_cash_cny * request.minimum_cash_fraction)
+                    minimum_cash = (
+                        open_nav * (1 - active_fraction)
+                        if request.risk_overlay.experiment_variant != "R0"
+                        else request.initial_cash_cny * request.minimum_cash_fraction
+                    )
+                    affordable = max(0.0, cash - minimum_cash)
                     if desired <= 0 or affordable <= 0:
                         continue
                     market = DailyBarLiquidity(
@@ -1047,6 +1148,7 @@ def run_backtest(
                     else:
                         rejection_counts[fill.status.value] = rejection_counts.get(fill.status.value, 0) + 1
                 pending_target = None
+                pending_risk_exposure = None
 
             closing_value = 0.0
             missing_marks = 0
@@ -1101,18 +1203,21 @@ def run_backtest(
                     "positions": len(positions), "daily_return": daily_return,
                     "turnover": day_notional / open_nav if open_nav else 0.0,
                     "cost": day_cost, "dividend_cash": day_dividend_cash,
-                    "missing_marks": missing_marks,
+                    "missing_marks": missing_marks, "cash_interest": day_cash_interest,
+                    "target_risk_exposure": current_risk_exposure,
+                    "actual_stock_exposure": closing_value / nav if nav else 0.0,
                 }
             )
 
             if session in signal_sessions and session != sessions[-1]:
-                if target_schedule is not None:
+                pending_risk_exposure = risk_schedule.get(session)
+                if session in selection_signal_sessions and target_schedule is not None:
                     pending_target = dict(target_schedule[session])
                     selected_holdings = [
                         {"ts_code": code, "weight": weight}
                         for code, weight in pending_target.items()
                     ]
-                else:
+                elif session in selection_signal_sessions:
                     signal_rows = _signal_rows(connection, resolved, request, session, prepared=True)
                     industry_by_code = (
                         _pit_industry_by_code(
@@ -1126,7 +1231,11 @@ def run_backtest(
                     selection = select_portfolio(
                         signal_rows,
                         request,
-                        set(positions),
+                        (
+                            model_target_holdings
+                            if request.selection_sequence_mode == "MODEL_TARGETS"
+                            else set(positions)
+                        ),
                         industry_by_code=industry_by_code,
                         maximum_industry_weight=maximum_industry_weight,
                         missing_industry_policy=missing_industry_policy,
@@ -1136,7 +1245,36 @@ def run_backtest(
                     pending_target = {
                         item["ts_code"]: 1 / count for item in selected_holdings
                     } if count else {}
-                if include_selection_history:
+                else:
+                    position_values = {
+                        code: quantity * last_marks.get(code, 0.0)
+                        for code, quantity in positions.items()
+                        if quantity > 0 and last_marks.get(code, 0.0) > 0
+                    }
+                    invested_value = sum(position_values.values())
+                    pending_target = (
+                        {code: value / invested_value for code, value in position_values.items()}
+                        if invested_value > 0
+                        else {}
+                    )
+                    selected_holdings = [
+                        {"ts_code": code, "weight": weight}
+                        for code, weight in pending_target.items()
+                    ]
+                if session in selection_signal_sessions:
+                    sequence_holdings = [
+                        {"ts_code": code, "weight": weight}
+                        for code, weight in sorted((pending_target or {}).items())
+                    ]
+                    if request.selection_sequence_mode == "MODEL_TARGETS":
+                        model_target_holdings = {item["ts_code"] for item in sequence_holdings}
+                    selection_sequence_records.append(
+                        {
+                            "signal_session": session.isoformat(),
+                            "holdings": sequence_holdings,
+                        }
+                    )
+                if include_selection_history and session in selection_signal_sessions:
                     selection_history.append(
                         {
                             "signal_session": session.isoformat(),
@@ -1188,6 +1326,38 @@ def run_backtest(
             row["daily_return"] for row in daily if date.fromisoformat(row["session"]).year == year
         ]
         annual.append({"year": year, "return": math.prod(1 + value for value in year_returns) - 1})
+    quarterly: list[dict[str, Any]] = []
+    quarter_keys = sorted(
+        {(parsed.year, (parsed.month - 1) // 3 + 1) for row in daily if (parsed := date.fromisoformat(row["session"]))}
+    )
+    for year, quarter in quarter_keys:
+        quarter_rows = [
+            row for row in daily
+            if (parsed := date.fromisoformat(row["session"])).year == year
+            and (parsed.month - 1) // 3 + 1 == quarter
+        ]
+        first_index = daily.index(quarter_rows[0])
+        opening_nav = request.initial_cash_cny if first_index == 0 else daily[first_index - 1]["nav"]
+        peak = opening_nav
+        maximum_drawdown = 0.0
+        for row in quarter_rows:
+            peak = max(peak, row["nav"])
+            maximum_drawdown = min(maximum_drawdown, row["nav"] / peak - 1)
+        quarterly.append(
+            {
+                "period": f"{year}Q{quarter}",
+                "start_session": quarter_rows[0]["session"],
+                "end_session": quarter_rows[-1]["session"],
+                "return": quarter_rows[-1]["nav"] / opening_nav - 1,
+                "maximum_drawdown": maximum_drawdown,
+                "average_target_exposure": fmean(
+                    float(row["target_risk_exposure"]) for row in quarter_rows
+                ),
+                "average_actual_stock_exposure": fmean(
+                    float(row["actual_stock_exposure"]) for row in quarter_rows
+                ),
+            }
+        )
     result = {
         "status": "PASS",
         "run_id": request.config_id,
@@ -1223,6 +1393,30 @@ def run_backtest(
         "benchmark": benchmark,
         "drawdown_period": drawdown_period,
         "latest_holdings": sorted(positions),
+        "selection_sequence": {
+            "mode": request.selection_sequence_mode,
+            "fingerprint": content_hash(selection_sequence_records),
+            "selection_count": len(selection_sequence_records),
+            "basis": (
+                "MODEL_TARGETS_INDEPENDENT_OF_EXECUTION"
+                if request.selection_sequence_mode == "MODEL_TARGETS"
+                else "ACTUAL_POSITIONS_AFTER_EXECUTION"
+            ),
+        },
+    }
+    result["risk_overlay"] = {
+        "experiment_variant": request.risk_overlay.experiment_variant,
+        "market_scope": request.risk_overlay.market_scope,
+        "initial_exposure": initial_risk_exposure,
+        "average_target_exposure": fmean(float(row["target_risk_exposure"]) for row in daily),
+        "average_actual_stock_exposure": fmean(float(row["actual_stock_exposure"]) for row in daily),
+        "exposure_change_count": len(risk_changes),
+        "changes": risk_changes,
+        "quarterly": quarterly,
+        "sample_classification": (
+            "RETROSPECTIVE_DIAGNOSTIC" if request.risk_overlay.experiment_variant == "R5"
+            else "HISTORICAL_DIAGNOSTIC"
+        ),
     }
     if include_selection_history:
         result["selection_history"] = selection_history
