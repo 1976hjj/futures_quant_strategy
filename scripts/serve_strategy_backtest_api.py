@@ -26,12 +26,12 @@ for import_root in (PROJECT_ROOT, SRC_ROOT):
         sys.path.insert(0, str(import_root))
 
 from alpha_research_os.kernel.canonical import canonical_json_bytes  # noqa: E402
-from alpha_research_os.portfolio.risk_overlay import RiskOverlaySpec  # noqa: E402
 from alpha_research_os.portfolio.rotation_backtest import (  # noqa: E402
     RotationBacktestRequest,
     preflight_rotation,
     preview_rotation,
 )
+from alpha_research_os.portfolio.shadow_health import ShadowHealthSpec  # noqa: E402
 from alpha_research_os.portfolio.strategy_backtest import (  # noqa: E402
     StrategyBacktestRequest,
     preflight,
@@ -71,7 +71,7 @@ def strategy_options(project_root: Path) -> dict[str, Any]:
             "minimum_listed_sessions": 60,
             "initial_cash_cny": 1_000_000,
         },
-        "risk_overlay_defaults": RiskOverlaySpec().model_dump(mode="json"),
+        "shadow_health_defaults": ShadowHealthSpec().model_dump(mode="json"),
     }
 
 
@@ -260,10 +260,10 @@ class StrategyJobManager:
             progress = int(progress_detail.get("progress") or 1)
         elif "publishing backtest report" in log_tail:
             phase, progress = "生成报告", 90
-        elif "running continuous account" in log_tail:
-            phase, progress = "连续账户回放", 20
         else:
-            phase, progress = "准备数据", 5
+            # Until the worker publishes its progress file, keep the job at the
+            # initial value. Log output is not an authoritative progress source.
+            phase, progress = "准备数据", 3
         request = json.loads(request_path.read_bytes())
         created_at = datetime.fromtimestamp(request_path.stat().st_mtime).astimezone()
         updated_paths = (request_path, log_path, result_path, progress_path)
@@ -289,6 +289,8 @@ class StrategyJobManager:
                 for key in (
                     "heartbeat_at", "processed_sessions", "total_sessions", "current_session",
                     "rebalance_count", "position_count", "query_progress",
+                    "completed_parameter_sets", "total_parameter_sets",
+                    "remaining_parameter_sets", "current_parameters",
                 )
             },
         }
@@ -357,6 +359,113 @@ class StrategyJobManager:
             "trades": page,
         }
 
+    @staticmethod
+    def _summary_path(result_path: Path) -> Path:
+        return result_path.with_name(
+            result_path.name.removesuffix(".result.json") + ".summary.json"
+        )
+
+    def _result_listing_summary(self, result_path: Path) -> dict[str, Any]:
+        """Read a tiny immutable sidecar, creating it once for legacy results."""
+        summary_path = self._summary_path(result_path)
+        result_stat = result_path.stat()
+        if summary_path.exists():
+            try:
+                summary = json.loads(summary_path.read_bytes())
+                if (
+                    isinstance(summary, dict)
+                    and summary.get("result_size") == result_stat.st_size
+                    and summary.get("result_mtime_ns") == result_stat.st_mtime_ns
+                ):
+                    return summary
+            except (OSError, json.JSONDecodeError):
+                pass
+        result = json.loads(result_path.read_bytes())
+        if not isinstance(result, dict):
+            raise ValueError("backtest result must be an object")
+        summary = {
+            "schema_version": "1",
+            "result_size": result_stat.st_size,
+            "result_mtime_ns": result_stat.st_mtime_ns,
+            "result_summary": result.get("summary"),
+            "trade_detail_available": "trades" in result,
+            "execution_model_valid": result.get("execution_model", {}).get("version") == "2.0.0",
+        }
+        temporary = summary_path.with_name(f".{summary_path.name}.{uuid.uuid4().hex}.tmp")
+        temporary.write_bytes(canonical_json_bytes(summary) + b"\n")
+        os.replace(temporary, summary_path)
+        return summary
+
+    def _list_item(self, request_path: Path) -> dict[str, Any]:
+        job_id = request_path.name.removesuffix(".request.json")
+        result_path = self.run_root / f"{job_id}.result.json"
+        progress_path = self.run_root / f"{job_id}.progress.json"
+        log_path = self.run_root / f"{job_id}.log"
+        request = json.loads(request_path.read_bytes())
+        active = self.active_job_id == job_id and self.running()
+        exit_code = (
+            self.process.poll()
+            if self.active_job_id == job_id and self.process is not None
+            else None
+        )
+        result_summary: dict[str, Any] | None = None
+        progress_detail: dict[str, Any] = {}
+        if result_path.exists():
+            listing = self._result_listing_summary(result_path)
+            status = "PASS"
+            phase = "回测完成"
+            progress = 100
+            result_summary = listing.get("result_summary")
+        else:
+            listing = {}
+            if job_id in self.stopped_jobs:
+                status = "STOPPED"
+            elif active:
+                status = "RUNNING"
+            elif exit_code not in (None, 0):
+                status = "FAIL"
+            else:
+                status = "STOPPED"
+            if progress_path.exists():
+                try:
+                    loaded = json.loads(progress_path.read_bytes())
+                    if isinstance(loaded, dict):
+                        progress_detail = loaded
+                except (OSError, json.JSONDecodeError):
+                    pass
+            phase = str(progress_detail.get("phase") or "准备数据")
+            progress = int(progress_detail.get("progress") or 3)
+        created_at = datetime.fromtimestamp(request_path.stat().st_mtime).astimezone()
+        updated_paths = (request_path, log_path, result_path, progress_path, self._summary_path(result_path))
+        progress_payload = {
+            key: progress_detail.get(key)
+            for key in (
+                "heartbeat_at", "processed_sessions", "total_sessions", "current_session",
+                "rebalance_count", "position_count", "query_progress",
+                "completed_parameter_sets", "total_parameter_sets",
+                "remaining_parameter_sets", "current_parameters",
+            )
+        }
+        return {
+            "job_id": job_id,
+            "status": status,
+            "phase": phase,
+            "progress": progress,
+            "name": request.get("name", ""),
+            "strategy_type": request.get("strategy_type", "FACTOR"),
+            "trade_detail_available": bool(listing.get("trade_detail_available")),
+            "execution_model_valid": bool(listing.get("execution_model_valid")),
+            "created_at": created_at.isoformat(),
+            "updated_at": datetime.fromtimestamp(
+                max(path.stat().st_mtime for path in updated_paths if path.exists())
+            ).astimezone().isoformat(),
+            "request": {"start": request.get("start"), "end": request.get("end")},
+            "process_alive": active,
+            "elapsed_seconds": max(0, int((datetime.now().astimezone() - created_at).total_seconds())),
+            "result_summary": result_summary,
+            **progress_payload,
+        }
+
     def list(self) -> list[dict[str, Any]]:
         """Return every persisted backtest, newest first.
 
@@ -365,13 +474,8 @@ class StrategyJobManager:
         """
         jobs: list[dict[str, Any]] = []
         for request_path in self.run_root.glob("*.request.json"):
-            job_id = request_path.name.removesuffix(".request.json")
             try:
-                item = self.status(job_id)
-                result = item.pop("result", None)
-                item.pop("log_tail", None)
-                item["result_summary"] = result.get("summary") if result else None
-                jobs.append(item)
+                jobs.append(self._list_item(request_path))
             except (OSError, ValueError, json.JSONDecodeError):
                 continue
         jobs.sort(key=lambda item: (item["created_at"], item["job_id"]), reverse=True)
@@ -387,7 +491,7 @@ class StrategyJobManager:
             if not request_path.exists():
                 raise FileNotFoundError(job_id)
             deleted: list[str] = []
-            for suffix in ("request.json", "result.json", "progress.json", "log"):
+            for suffix in ("request.json", "result.json", "summary.json", "progress.json", "log"):
                 path = self.run_root / f"{job_id}.{suffix}"
                 if path.exists():
                     path.unlink()

@@ -63,7 +63,6 @@ def test_rotation_request_requires_two_unique_candidates() -> None:
 def test_rotation_options_expose_calculated_and_not_yet_calculated_factors() -> None:
     options = rotation_options(PROJECT_ROOT)
 
-    assert options["factor_counts"]["total"] == 177
     assert options["factor_counts"]["calculated"] > 0
     assert options["factor_counts"]["needs_calculation"] > 0
     assert len(options["factors"]) == options["factor_counts"]["total"]

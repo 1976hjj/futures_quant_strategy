@@ -18,7 +18,11 @@ from alpha_research_os.portfolio.rotation_backtest import (  # noqa: E402
     RotationBacktestRequest,
     run_rotation_backtest,
 )
-from scripts.run_strategy_backtest import ProgressReporter, _atomic_write  # noqa: E402
+from scripts.run_strategy_backtest import (  # noqa: E402
+    ProgressReporter,
+    _atomic_write,
+    _listing_summary,
+)
 
 
 def main() -> int:
@@ -41,6 +45,13 @@ def main() -> int:
     print("publishing backtest report", flush=True)
     reporter.update({"phase": "生成轮动回测报告", "progress": 99})
     _atomic_write(args.result, canonical_json_bytes(result) + b"\n")
+    summary_path = args.result.with_name(
+        args.result.name.removesuffix(".result.json") + ".summary.json"
+    )
+    _atomic_write(
+        summary_path,
+        canonical_json_bytes(_listing_summary(args.result, result)) + b"\n",
+    )
     reporter.update({"phase": "轮动回测完成", "progress": 100})
     reporter.close()
     print(json.dumps({"run_id": result["run_id"], "status": "PASS"}), flush=True)

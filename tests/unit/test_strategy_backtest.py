@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, timedelta
 
 import duckdb
 import pytest
@@ -9,6 +9,8 @@ from pydantic import ValidationError
 
 from alpha_research_os.portfolio.strategy_backtest import (
     StrategyBacktestRequest,
+    _adjusted_ma_states,
+    _attach_adjusted_ma_states,
     _is_pit_abnormal_security,
     _market_rows,
     _maximum_drawdown_period,
@@ -28,6 +30,9 @@ def _market_connection() -> duckdb.DuckDBPyConnection:
     connection = duckdb.connect(":memory:")
     connection.execute("CREATE SCHEMA research")
     connection.execute("CREATE SCHEMA raw")
+    connection.execute(
+        "CREATE TABLE research.trading_calendar(exchange VARCHAR, cal_date DATE, is_open BOOLEAN)"
+    )
     connection.execute(
         """CREATE TABLE research.security_session_state(
         trade_date DATE, ts_code VARCHAR, security_name VARCHAR, name_is_point_in_time BOOLEAN,
@@ -120,6 +125,57 @@ def test_pit_abnormal_security_uses_same_session_name(name: str) -> None:
 
 def test_current_snapshot_name_is_not_used_as_historical_status() -> None:
     assert _is_pit_abnormal_security("欣泰电气(退)", False, False) is False
+
+
+def test_adjusted_ma_state_uses_only_closes_available_by_signal_date() -> None:
+    connection = _market_connection()
+    start = date(2025, 1, 1)
+    sessions = [start + timedelta(days=index) for index in range(61)]
+    signal_date = sessions[59]
+    prices = [10.0] * 59 + [9.0, 1000.0]
+    connection.executemany(
+        "INSERT INTO research.market_daily VALUES (?, '000001.SZ', 10, ?, 1000000, true)",
+        [[session, price] for session, price in zip(sessions, prices, strict=True)],
+    )
+    connection.executemany(
+        "INSERT INTO research.adj_factor VALUES (?, '000001.SZ', 1.0)",
+        [[session] for session in sessions],
+    )
+
+    state = _adjusted_ma_states(connection, signal_date, {"000001.SZ"}, 60)["000001.SZ"]
+
+    assert state["observations"] == 60
+    assert state["adjusted_close"] == 9.0
+    assert state["moving_average"] == pytest.approx((59 * 10 + 9) / 60)
+    assert state["eligible"] is False
+
+
+def test_prefetched_ma_state_is_point_in_time_for_each_session() -> None:
+    connection = _market_connection()
+    start = date(2025, 1, 1)
+    sessions = [start + timedelta(days=index) for index in range(4)]
+    prices = [10.0, 10.0, 9.0, 11.0]
+    connection.executemany(
+        "INSERT INTO research.market_daily VALUES (?, '000001.SZ', 10, ?, 1000000, true)",
+        [[session, price] for session, price in zip(sessions, prices, strict=True)],
+    )
+    connection.executemany(
+        "INSERT INTO research.adj_factor VALUES (?, '000001.SZ', 1.0)",
+        [[session] for session in sessions],
+    )
+    cache = {
+        "000001.SZ": {
+            sessions[2]: {},
+            sessions[3]: {},
+        }
+    }
+
+    _attach_adjusted_ma_states(
+        connection, sessions[-1], {"000001.SZ"}, 3, cache
+    )
+
+    assert cache["000001.SZ"][sessions[2]]["trend_ma_eligible"] is False
+    assert cache["000001.SZ"][sessions[3]]["trend_ma_eligible"] is True
 
 
 def test_selection_excludes_pit_abnormal_name_without_future_delist_data() -> None:
@@ -294,8 +350,18 @@ def test_strategy_job_history_is_persisted_and_sorted(tmp_path) -> None:
     assert jobs[0]["status"] == "STOPPED"
     assert jobs[1]["status"] == "PASS"
     assert jobs[1]["result_summary"] == {"total_return": 0.1}
+    assert jobs[1]["request"] == {"start": "2025-01-01", "end": "2025-12-31"}
     assert "result" not in jobs[1]
     assert "log_tail" not in jobs[1]
+    assert (manager.run_root / "20260908-120000-aaaaaa.summary.json").exists()
+
+    # A second list refresh reads the small sidecar and does not need to parse
+    # the immutable result again.
+    summary_path = manager.run_root / "20260908-120000-aaaaaa.summary.json"
+    first_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    second_jobs = manager.list()
+    assert second_jobs[1]["result_summary"] == {"total_return": 0.1}
+    assert json.loads(summary_path.read_text(encoding="utf-8")) == first_summary
 
     deleted = manager.delete("20260908-130000-bbbbbb")
     assert deleted["deleted"] is True

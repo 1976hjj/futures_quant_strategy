@@ -42,6 +42,18 @@ def _atomic_write(path: Path, payload: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _listing_summary(result_path: Path, result: dict[str, Any]) -> dict[str, Any]:
+    stat = result_path.stat()
+    return {
+        "schema_version": "1",
+        "result_size": stat.st_size,
+        "result_mtime_ns": stat.st_mtime_ns,
+        "result_summary": result.get("summary"),
+        "trade_detail_available": "trades" in result,
+        "execution_model_valid": result.get("execution_model", {}).get("version") == "2.0.0",
+    }
+
+
 class ProgressReporter:
     def __init__(self, path: Path | None) -> None:
         self.path = path
@@ -50,12 +62,19 @@ class ProgressReporter:
         self.state: dict[str, Any] = {"phase": "校验输入", "progress": 3}
         self.thread: threading.Thread | None = None
         if path is not None:
+            # Publish the authoritative initial state before any log-based API
+            # fallback can briefly report a later phase and make the UI jump backwards.
+            self._write()
             self.thread = threading.Thread(target=self._heartbeat, daemon=True)
             self.thread.start()
 
     def update(self, patch: dict[str, Any]) -> None:
+        completed = patch.get("completed_parameter_sets")
+        force_write = isinstance(completed, int) and completed > 0 and completed % 5 == 0
         with self.lock:
             self.state.update(patch)
+        if force_write:
+            self._write()
 
     def _write(self) -> None:
         if self.path is None:
@@ -102,6 +121,13 @@ def main() -> int:
     print("publishing backtest report", flush=True)
     reporter.update({"phase": "生成回测报告", "progress": 98})
     _atomic_write(args.result, canonical_json_bytes(result) + b"\n")
+    summary_path = args.result.with_name(
+        args.result.name.removesuffix(".result.json") + ".summary.json"
+    )
+    _atomic_write(
+        summary_path,
+        canonical_json_bytes(_listing_summary(args.result, result)) + b"\n",
+    )
     reporter.update({"phase": "回测完成", "progress": 100})
     reporter.close()
     print(json.dumps({"run_id": result["run_id"], "status": "PASS"}, ensure_ascii=False), flush=True)
