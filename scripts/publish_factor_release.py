@@ -13,7 +13,7 @@ from typing import Any
 
 import duckdb
 
-from alpha_research_os.factors import build_initial_catalog, build_m4_2_catalog
+from alpha_research_os.factors import FactorCatalog, build_initial_catalog, build_m4_2_catalog
 from alpha_research_os.factors.assets import (
     DatasetLineage,
     FactorAssetRef,
@@ -68,7 +68,8 @@ def _lineage(connection: duckdb.DuckDBPyConnection) -> tuple[DatasetLineage, ...
 
 
 def _request(
-    connection: duckdb.DuckDBPyConnection, start: date, end: date, catalog_profile: str = "initial"
+    connection: duckdb.DuckDBPyConnection, start: date, end: date, catalog_profile: str = "initial",
+    factor_id: str | None = None,
 ) -> tuple[FactorAssetRequest, Any]:
     if catalog_profile == "initial":
         catalog = build_initial_catalog()
@@ -78,6 +79,12 @@ def _request(
         engine_version = M42_ENGINE_VERSION
     else:
         raise ValueError(f"unknown catalog profile: {catalog_profile}")
+    if factor_id is not None:
+        selected = [item.entry for item in catalog.list() if item.entry.spec.factor_id == factor_id]
+        if len(selected) != 1:
+            raise ValueError(f"factor is not in the {catalog_profile} catalog: {factor_id}")
+        catalog = FactorCatalog()
+        catalog.register(selected[0])
     references = tuple(
         sorted(
             (
@@ -240,12 +247,17 @@ def _materialize_yearly(
     request: FactorAssetRequest,
     target: Path,
     max_history: int,
+    *,
+    output_start: date | None = None,
+    output_end: date | None = None,
 ) -> None:
-    staging = target.parent / "yearly_staging"
+    range_start = output_start or request.start
+    range_end = output_end or request.end
+    staging = target.parent / f"yearly_staging_{range_start:%Y%m%d}_{range_end:%Y%m%d}"
     staging.mkdir(parents=True, exist_ok=True)
     partition_paths: list[Path] = []
-    for output_start, output_end in _year_ranges(request.start, request.end):
-        partition = staging / f"year={output_start.year}.parquet"
+    for year_start, year_end in _year_ranges(range_start, range_end):
+        partition = staging / f"year={year_start.year}.parquet"
         partition_paths.append(partition)
         if partition.exists():
             with duckdb.connect() as connection:
@@ -256,15 +268,15 @@ def _materialize_yearly(
             if (
                 identity == request.computation_key
                 and lower is not None
-                and output_start <= lower <= upper <= output_end
+                and year_start <= lower <= upper <= year_end
             ):
-                print(f"year={output_start.year} cache_hit", flush=True)
+                print(f"year={year_start.year} cache_hit", flush=True)
                 continue
             raise ValueError(f"invalid yearly staging partition: {partition}")
         with duckdb.connect(str(database), read_only=True) as connection:
             _configure_bounded_connection(connection, store / "duckdb_tmp")
-            warmup_start = _warmup_start(connection, output_start, max_history)
-            print(f"year={output_start.year} materializing", flush=True)
+            warmup_start = _warmup_start(connection, year_start, max_history)
+            print(f"year={year_start.year} materializing", flush=True)
             temporary = partition.with_name(f".{partition.stem}.{uuid.uuid4().hex}.tmp.parquet")
             connection.execute(
                 _bounded_materialization_sql(
@@ -272,8 +284,8 @@ def _materialize_yearly(
                     request,
                     temporary,
                     warmup_start,
-                    output_start=output_start,
-                    output_end=output_end,
+                    output_start=year_start,
+                    output_end=year_end,
                 )
             )
         os.replace(temporary, partition)
@@ -476,17 +488,118 @@ def _register(
         connection.close()
 
 
+def _incremental_parent(store: Path, request: FactorAssetRequest) -> tuple[FactorReleaseManifest, Path] | None:
+    """Find the newest compatible value series that ends before the requested extension."""
+    if len(request.factors) != 1:
+        return None
+    candidates: list[tuple[FactorReleaseManifest, Path]] = []
+    for path in (store / "releases").glob("*/manifest.json"):
+        try:
+            manifest = FactorReleaseManifest.model_validate_json(path.read_bytes())
+            previous = manifest.request
+            parquet = store / manifest.parquet_relative_path
+            if (
+                previous.start <= request.start <= previous.end < request.end
+                and previous.engine_version == request.engine_version
+                and request.factors[0] in previous.factors
+                and previous.signal_clock_version == request.signal_clock_version
+                and previous.universe_id == request.universe_id
+                and parquet.is_file()
+                and _sha256_file(parquet) == manifest.parquet_hash
+            ):
+                candidates.append((manifest, parquet))
+        except (OSError, ValueError):
+            continue
+    return max(candidates, key=lambda item: (item[0].request.end, item[0].created_at)) if candidates else None
+
+
+def _overlap_check(
+    old_parquet: Path, new_parquet: Path, factor_id: str, start: date, end: date
+) -> dict[str, Any]:
+    old_source = f"read_parquet('{_sql_path(old_parquet)}')"
+    new_source = f"read_parquet('{_sql_path(new_parquet)}')"
+    with duckdb.connect() as connection:
+        row = connection.execute(
+            f"""WITH old_values AS (
+              SELECT session,instrument_id,factor_id,factor_version,variant,value,available_at,implementation_hash
+              FROM {old_source} WHERE factor_id=? AND session BETWEEN ? AND ?
+            ), new_values AS (
+              SELECT session,instrument_id,factor_id,factor_version,variant,value,available_at,implementation_hash
+              FROM {new_source} WHERE session BETWEEN ? AND ?
+            )
+            SELECT count(*) FILTER (WHERE o.instrument_id IS NOT NULL) AS old_rows,
+                   count(*) FILTER (WHERE n.instrument_id IS NOT NULL) AS new_rows,
+                   count(*) FILTER (WHERE o.instrument_id IS NULL OR n.instrument_id IS NULL
+                     OR o.value IS DISTINCT FROM n.value
+                     OR o.available_at IS DISTINCT FROM n.available_at
+                     OR o.implementation_hash IS DISTINCT FROM n.implementation_hash) AS differences
+            FROM old_values o FULL OUTER JOIN new_values n
+            USING (session,instrument_id,factor_id,factor_version,variant)""",
+            [factor_id, start, end, start, end],
+        ).fetchone()
+    old_rows, new_rows, differences = map(int, row)
+    return {
+        "start": start.isoformat(), "end": end.isoformat(),
+        "old_rows": old_rows, "new_rows": new_rows, "different_rows": differences,
+        "matched": old_rows > 0 and new_rows > 0 and differences == 0,
+    }
+
+
+def _join_incremental_values(
+    old_parquet: Path, new_parquet: Path, target: Path, request: FactorAssetRequest,
+    old_end: date,
+) -> None:
+    factor_id = request.factors[0].factor_id
+    with duckdb.connect() as connection:
+        connection.execute(
+            f"""COPY (
+              SELECT {_sql_string(request.computation_key)} AS release_id,
+                     session,instrument_id,factor_id,factor_version,variant,value,available_at,implementation_hash
+              FROM read_parquet('{_sql_path(old_parquet)}')
+              WHERE factor_id={_sql_string(factor_id)}
+                AND session BETWEEN DATE {_sql_string(request.start.isoformat())}
+                                AND DATE {_sql_string(old_end.isoformat())}
+              UNION ALL
+              SELECT * FROM read_parquet('{_sql_path(new_parquet)}')
+              WHERE session > DATE {_sql_string(old_end.isoformat())}
+              ORDER BY session,instrument_id,factor_id,factor_version
+            ) TO '{_sql_path(target)}'
+            (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 6, ROW_GROUP_SIZE 122880)"""
+        )
+
+
+def _materialize_range(
+    database: Path, store: Path, catalog: Any, request: FactorAssetRequest,
+    target: Path, max_history: int, output_start: date, output_end: date,
+) -> None:
+    if (output_end - output_start).days > 370:
+        _materialize_yearly(
+            database, store, catalog, request, target, max_history,
+            output_start=output_start, output_end=output_end,
+        )
+    else:
+        with duckdb.connect(str(database), read_only=True) as connection:
+            _configure_bounded_connection(connection, store / "duckdb_tmp")
+            warmup_start = _warmup_start(connection, output_start, max_history)
+            connection.execute(
+                _bounded_materialization_sql(
+                    catalog, request, target, warmup_start,
+                    output_start=output_start, output_end=output_end,
+                )
+            )
+
+
 def publish(
-    database: Path, store: Path, start: date, end: date, catalog_profile: str = "initial"
+    database: Path, store: Path, start: date, end: date, catalog_profile: str = "initial",
+    factor_id: str | None = None,
 ) -> dict[str, Any]:
     with duckdb.connect(str(database), read_only=True) as connection:
-        request, catalog = _request(connection, start, end, catalog_profile)
+        request, catalog = _request(connection, start, end, catalog_profile, factor_id)
         max_history = max(
             item.compiled_expression.required_history
             for item in catalog.registry.list()
             if item.compiled_expression is not None
         )
-        warmup_start = _warmup_start(connection, start, max_history)
     release_dir = store / "releases" / request.computation_key.removeprefix("sha256:")
     parquet = release_dir / "raw_factor_values.parquet"
     quality_path = release_dir / "quality_summary.json"
@@ -497,16 +610,49 @@ def publish(
             raise ValueError("cached factor release failed immutable identity verification")
         quality = json.loads(quality_path.read_bytes())
         _register(database, store, manifest, content_hash(manifest), catalog, quality["factors"], catalog_profile)
-        return {"cache_hit": True, "release_id": manifest.release_id, "manifest": str(manifest_path.resolve())}
+        calculation_path = release_dir / "calculation_summary.json"
+        calculation = json.loads(calculation_path.read_bytes()) if calculation_path.exists() else {}
+        return {
+            "cache_hit": True, "release_id": manifest.release_id,
+            "manifest": str(manifest_path.resolve()), "calculation": calculation or None,
+        }
 
     release_dir.mkdir(parents=True, exist_ok=True)
     temporary = release_dir / f".raw_factor_values.{uuid.uuid4().hex}.tmp.parquet"
-    if (end - start).days > 370:
-        _materialize_yearly(database, store, catalog, request, temporary, max_history)
-    else:
+    calculation: dict[str, Any] = {"mode": "FULL", "message": "已按所选区间完整计算。"}
+    parent = _incremental_parent(store, request) if factor_id is not None else None
+    if parent:
+        previous, old_parquet = parent
         with duckdb.connect(str(database), read_only=True) as connection:
-            _configure_bounded_connection(connection, store / "duckdb_tmp")
-            connection.execute(_materialization_sql(catalog, request, temporary, warmup_start))
+            overlap_start = max(start, _warmup_start(connection, previous.request.end, 20))
+        partial = release_dir / f".incremental_values.{uuid.uuid4().hex}.tmp.parquet"
+        print(f"incremental overlap={overlap_start}..{previous.request.end}", flush=True)
+        _materialize_range(database, store, catalog, request, partial, max_history, overlap_start, end)
+        overlap = _overlap_check(
+            old_parquet, partial, factor_id, overlap_start, previous.request.end
+        )
+        calculation = {"parent_release_id": previous.release_id, "overlap": overlap}
+        if overlap["matched"]:
+            print("incremental overlap matched; joining old and new values", flush=True)
+            _join_incremental_values(old_parquet, partial, temporary, request, previous.request.end)
+            calculation.update({
+                "mode": "INCREMENTAL",
+                "message": f"重叠区间 {overlap_start} 至 {previous.request.end} 核对一致，已拼接新增日期。",
+            })
+        else:
+            print(f"incremental overlap mismatch: {overlap}; recalculating full range", flush=True)
+            calculation.update({
+                "mode": "FULL_AFTER_MISMATCH",
+                "message": (
+                    f"重叠区间 {overlap_start} 至 {previous.request.end} 有 "
+                    f"{overlap['different_rows']} 条差异（旧/新各 {overlap['old_rows']}/{overlap['new_rows']} 条）；"
+                    "为避免拼接错误，已自动全区间重算。"
+                ),
+            })
+            _materialize_range(database, store, catalog, request, temporary, max_history, start, end)
+        partial.unlink(missing_ok=True)
+    else:
+        _materialize_range(database, store, catalog, request, temporary, max_history, start, end)
     quality, quality_details = _quality(temporary, len(request.factors))
     os.replace(temporary, parquet)
     _atomic_write(quality_path, canonical_json_bytes(quality))
@@ -524,6 +670,7 @@ def publish(
         quality_summary_hash=_sha256_file(quality_path),
     )
     _atomic_write(manifest_path, canonical_json_bytes(manifest))
+    _atomic_write(release_dir / "calculation_summary.json", canonical_json_bytes(calculation) + b"\n")
     manifest_hash = content_hash(manifest)
     _register(database, store, manifest, manifest_hash, catalog, quality_details, catalog_profile)
     return {
@@ -536,6 +683,7 @@ def publish(
         "instrument_count": manifest.instrument_count,
         "factor_count": manifest.factor_count,
         "manifest": str(manifest_path.resolve()),
+        "calculation": calculation,
     }
 
 
@@ -546,14 +694,13 @@ def main() -> int:
     parser.add_argument("--start", type=date.fromisoformat, default=date(2024, 1, 2))
     parser.add_argument("--end", type=date.fromisoformat, default=date(2024, 3, 29))
     parser.add_argument("--catalog-profile", choices=("initial", "m4.2"), default="initial")
+    parser.add_argument("--factor-id", type=str)
+    parser.add_argument("--result", type=Path)
     args = parser.parse_args()
-    print(
-        json.dumps(
-            publish(args.database, args.store, args.start, args.end, args.catalog_profile),
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
+    result = publish(args.database, args.store, args.start, args.end, args.catalog_profile, args.factor_id)
+    if args.result:
+        _atomic_write(args.result, canonical_json_bytes(result) + b"\n")
+    print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 

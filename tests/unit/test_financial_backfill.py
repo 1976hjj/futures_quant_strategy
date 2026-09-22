@@ -68,3 +68,19 @@ def test_financial_backfill_pages_until_short_page_and_resumes(tmp_path) -> None
     second = backfill(**arguments)
     assert second["fetched_this_run"] == 0
     assert len(transport.calls) == 2
+
+
+def test_financial_archive_extends_and_refreshes_recent_period_once(tmp_path) -> None:
+    transport = _FinancialTransport()
+    provider = TushareProvider(token="test-secret", api_base_url="https://gateway.example.invalid/",
+                               transport=transport, clock=lambda: RETRIEVED_AT)
+    common = dict(provider=provider, start=date(2023, 12, 31), output=tmp_path / "financial",
+                  apis=("income_vip",), periods=("20231231",), page_size=2,
+                  min_free_gb=0, sleep_seconds=0)
+    backfill(**common, end=date(2023, 12, 31))
+    extended = backfill(**common, end=date(2024, 1, 2), refresh_recent_periods=1)
+    assert extended["fetched_this_run"] == 2
+    state = json.loads((tmp_path / "financial" / "checkpoint.json").read_bytes())
+    assert state["coverage"]["end"] == "2024-01-02"
+    assert "20231231:refresh:20240102:offset=0" in state["completed"]["income_vip"]
+    assert backfill(**common, end=date(2024, 1, 2), refresh_recent_periods=1)["fetched_this_run"] == 0

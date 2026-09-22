@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date
 
 from alpha_research_os.data.providers.tushare import TushareProvider
@@ -11,6 +12,8 @@ from scripts.backfill_tushare_m2e import (
     _offset_parameter_rejected,
     _request,
     _tasks,
+    backfill,
+    _new_checkpoint,
 )
 
 
@@ -20,6 +23,32 @@ def test_m2e_universe_request_uses_domain_contract_field() -> None:
     assert request.data_domain is DataDomain.UNIVERSE
     assert request.fields == ("index_code",)
     assert "_all_fields=true" in request.parameters
+
+
+def test_m2e_limit_only_update_extends_existing_archive(monkeypatch, tmp_path) -> None:
+    class Transport:
+        def post(self, url: str, payload: bytes, *, timeout: float) -> bytes:
+            request = json.loads(payload)
+            fields = ["ts_code", "trade_date", "up_limit", "down_limit"]
+            row = ["000001.SZ", "20260902", "11", "9"]
+            return json.dumps({"code": 0, "data": {"fields": fields, "items": [row]}}).encode()
+
+    from scripts import backfill_tushare_m2e as module
+    monkeypatch.setattr(module, "_load_inputs", lambda *_: (["20260902"], [], []))
+    monkeypatch.setattr(module, "_tasks", lambda *_: [
+        Task("stk_limit", "20260902", date(2026, 9, 2), date(2026, 9, 2), page_size=5800)
+    ])
+    output = tmp_path / "m2e"
+    output.mkdir()
+    state = _new_checkpoint("https://gateway.example.invalid/", date(1990, 12, 31), date(2026, 9, 1), 0)
+    (output / "checkpoint.json").write_text(json.dumps(state), encoding="utf-8")
+    provider = TushareProvider(token="test-secret", api_base_url="https://gateway.example.invalid/",
+                               transport=Transport())
+    result = backfill(provider=provider, start=date(1990, 12, 31), end=date(2026, 9, 2),
+                      output=output, reference=tmp_path, financial=tmp_path, database=tmp_path / "db",
+                      min_free_gb=0, sleep_seconds=0, apis=("stk_limit",))
+    assert result["fetched_this_run"] == 1
+    assert json.loads((output / "checkpoint.json").read_bytes())["coverage"]["end"] == "2026-09-02"
 
 
 def test_m2e_hk_hold_stops_before_daily_disclosure_ended() -> None:

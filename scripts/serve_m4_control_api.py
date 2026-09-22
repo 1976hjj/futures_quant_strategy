@@ -30,6 +30,7 @@ for import_root in (PROJECT_ROOT, SRC_ROOT):
 
 from alpha_research_os.factors.alpha158 import alpha158_catalog  # noqa: E402
 from alpha_research_os.factors.jqdata import jqdata_catalog  # noqa: E402
+from alpha_research_os.factors.library import m4_2_factor_entries  # noqa: E402
 from alpha_research_os.kernel.canonical import canonical_json_bytes, content_hash  # noqa: E402
 from alpha_research_os.orchestration import M4PipelineConfig  # noqa: E402
 from alpha_research_os.reporting import (  # noqa: E402
@@ -140,9 +141,10 @@ class FactorComputeRequest(BaseModel):
         if self.end < self.start:
             raise ValueError("end must not precede start")
         catalog = {item.factor_id: item for item in (*alpha158_catalog(), *jqdata_catalog())}
+        catalog.update({item.spec.factor_id: item.spec for item in m4_2_factor_entries()})
         item = catalog.get(self.factor_id)
         if item is None:
-            raise ValueError("only an Alpha158 or JQData catalog factor can be calculated here")
+            raise ValueError("factor is not in the current, Alpha158, or JQData catalog")
         if item.factor_version != self.factor_version:
             raise ValueError("factor version does not match the catalog")
         return self
@@ -502,19 +504,23 @@ class FactorJobManager:
             stream = log_path.open("wb")
             environment = os.environ.copy()
             environment["PYTHONPATH"] = os.pathsep.join((str(SRC_ROOT), str(PROJECT_ROOT)))
+            current_factor_ids = {item.spec.factor_id for item in m4_2_factor_entries()}
+            publisher = (
+                "scripts/publish_factor_release.py" if request.factor_id in current_factor_ids
+                else "scripts/publish_jqdata_factor.py" if request.factor_id.startswith("jqdata-")
+                else "scripts/publish_alpha158_factor.py"
+            )
+            command = [
+                sys.executable, publisher,
+                "--factor-id", request.factor_id,
+                "--start", request.start.isoformat(),
+                "--end", request.end.isoformat(),
+                "--result", str(result_path),
+            ]
+            if request.factor_id in current_factor_ids:
+                command.extend(("--catalog-profile", "m4.2"))
             self.process = subprocess.Popen(
-                [
-                    sys.executable,
-                    (
-                        "scripts/publish_jqdata_factor.py"
-                        if request.factor_id.startswith("jqdata-")
-                        else "scripts/publish_alpha158_factor.py"
-                    ),
-                    "--factor-id", request.factor_id,
-                    "--start", request.start.isoformat(),
-                    "--end", request.end.isoformat(),
-                    "--result", str(result_path),
-                ],
+                command,
                 cwd=self.project_root,
                 env=environment,
                 stdout=stream,
@@ -574,7 +580,11 @@ class FactorJobManager:
             elif verification.get("status") == "PENDING":
                 phase, progress, message = "计算完成，后台复核中", 100, "候选因子值已可使用，准确性复核正在后台运行。"
             else:
-                phase, progress, message = "发布完成", 100, "因子值已通过准确性复核并发布。"
+                calculation = result.get("calculation") or {}
+                phase, progress, message = (
+                    "发布完成", 100,
+                    calculation.get("message") or "因子值已通过准确性复核并发布。",
+                )
         elif status == "FAIL":
             phase, progress, message = "计算失败", 100, last_log_line or "任务异常退出，请查看运行日志。"
         elif status == "STOPPED":

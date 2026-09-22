@@ -11,7 +11,7 @@ import time
 import traceback
 import uuid
 from collections.abc import Callable
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from http.client import IncompleteRead
 from pathlib import Path
 from typing import Any
@@ -133,8 +133,9 @@ def _load_checkpoint(path: Path, *, endpoint: str, start: date, end: date) -> di
         raise ValueError("unsupported M2-B checkpoint schema")
     if state.get("api_base_url") != endpoint:
         raise ValueError("M2-B checkpoint belongs to another endpoint")
-    if state.get("coverage") != {"end": end.isoformat(), "start": start.isoformat()}:
-        raise ValueError("coverage changes require a new M2-B archive or an explicit migration")
+    coverage = state.get("coverage") or {}
+    if coverage.get("start") != start.isoformat() or end < date.fromisoformat(coverage["end"]):
+        raise ValueError("M2-B coverage may only extend its existing end date")
     for api_name in FIELDS:
         state.setdefault("completed", {}).setdefault(api_name, {})
     return state
@@ -192,6 +193,8 @@ def backfill(
     output.mkdir(parents=True, exist_ok=True)
     checkpoint_path = output / "checkpoint.json"
     state = _load_checkpoint(checkpoint_path, endpoint=provider.spec.api_base_url, start=start, end=end)
+    previous_end = date.fromisoformat(state["coverage"]["end"])
+    extension_start = previous_end + timedelta(days=1) if end > previous_end else None
     completed = state["completed"]
     raw_store = RawSnapshotStore(ArtifactStore(output / "artifacts"))
 
@@ -230,20 +233,23 @@ def backfill(
             time.sleep(sleep_seconds)
         return rows
 
-    calendar_key = f"SSE:{start:%Y%m%d}:{end:%Y%m%d}"
-    if calendar_key not in completed["trade_cal"]:
+    calendar_start = extension_start or start
+    calendar_key = f"SSE:{calendar_start:%Y%m%d}:{end:%Y%m%d}"
+    if calendar_key not in completed["trade_cal"] and (extension_start is not None or not completed["trade_cal"]):
         rows = fetch_and_capture(
             _request(
                 api_name="trade_cal",
-                request_id=f"M2B-CALENDAR-{start:%Y%m%d}-{end:%Y%m%d}",
-                start=start,
+                request_id=f"M2B-CALENDAR-{calendar_start:%Y%m%d}-{end:%Y%m%d}",
+                start=calendar_start,
                 end=end,
                 parameters=("exchange=SSE",),
             ),
             "trade_cal",
             calendar_key,
         )
-        state["open_sessions"] = sorted(str(row["cal_date"]) for row in rows if str(row["is_open"]) == "1")
+        state["open_sessions"] = sorted(set(state.get("open_sessions", [])) | {
+            str(row["cal_date"]) for row in rows if str(row["is_open"]) == "1"
+        })
         _atomic_write(checkpoint_path, canonical_json_bytes(state))
     else:
         skipped += 1
@@ -273,25 +279,29 @@ def backfill(
             )
 
     if "namechange" in selected:
-        key = f"{as_of}:all"
-        if key in completed["namechange"]:
-            skipped += 1
-        else:
-            fetch_and_capture(
-                _request(
-                    api_name="namechange",
-                    request_id=f"M2B-NAMECHANGE-{as_of}",
-                    start=start,
-                    end=end,
-                    parameters=("_query_mode=all",),
-                ),
-                "namechange",
-                key,
-            )
-        for year in range(start.year, end.year + 1):
-            range_start = max(start, date(year, 1, 1))
+        if extension_start is None:
+            key = f"{as_of}:all"
+            if key in completed["namechange"]:
+                skipped += 1
+            else:
+                fetch_and_capture(
+                    _request(
+                        api_name="namechange",
+                        request_id=f"M2B-NAMECHANGE-{as_of}",
+                        start=start,
+                        end=end,
+                        parameters=("_query_mode=all",),
+                    ),
+                    "namechange",
+                    key,
+                )
+        for year in range((extension_start or start).year, end.year + 1):
+            range_start = max(extension_start or start, date(year, 1, 1))
             range_end = min(end, date(year, 12, 31))
-            range_key = f"range:{year:04d}"
+            range_key = (
+                f"range:{year:04d}:{range_start:%Y%m%d}:{range_end:%Y%m%d}"
+                if extension_start else f"range:{year:04d}"
+            )
             if range_key in completed["namechange"]:
                 skipped += 1
                 continue
@@ -357,6 +367,9 @@ def backfill(
             )
             print(f"M2-B progress {done}/{expected} api={api_name} partition={session}", flush=True)
 
+    if max_sessions is None:
+        state["coverage"] = {"start": start.isoformat(), "end": end.isoformat()}
+        _atomic_write(checkpoint_path, canonical_json_bytes(state))
     totals = {
         api_name: {
             "partitions": len(partitions),

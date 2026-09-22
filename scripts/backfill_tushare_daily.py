@@ -150,6 +150,7 @@ def backfill(
     max_sessions: int | None,
     sleep_seconds: float,
     workers: int,
+    require_nonempty: bool = False,
 ) -> dict[str, object]:
     artifacts = ArtifactStore(output / "artifacts")
     _save_run_status(
@@ -232,6 +233,8 @@ def backfill(
             parameters=(f"api_name={api_name}",),
         )
         response = fetch_resilient(request)
+        if require_nonempty and not tushare_response_rows(response.payload):
+            raise RuntimeError(f"{api_name} has no rows for open session {session}; retry after provider publishes data")
         if sleep_seconds:
             time.sleep(sleep_seconds)
         return session, api_name, response
@@ -299,6 +302,7 @@ def main() -> int:
     parser.add_argument("--max-sessions", type=int)
     parser.add_argument("--sleep-ms", type=float, default=50.0)
     parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--require-nonempty", action="store_true")
     args = parser.parse_args()
     token = os.environ.get(args.token_env)
     if not token:
@@ -317,6 +321,7 @@ def main() -> int:
             max_sessions=args.max_sessions,
             sleep_seconds=args.sleep_ms / 1000,
             workers=args.workers,
+            require_nonempty=args.require_nonempty,
         )
     except Exception as error:
         _save_run_status(

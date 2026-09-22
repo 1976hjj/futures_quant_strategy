@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
@@ -32,11 +33,19 @@ class UrllibHTTPTransport:
         request = Request(
             url,
             data=payload,
-            headers={"Content-Type": "application/json", "User-Agent": "alpha-research-os/0.1"},
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "alpha-research-os/0.1",
+                # The configured Tushare-compatible gateway requires clients to
+                # opt into compressed responses for large market-data payloads.
+                "Accept-Encoding": "gzip",
+            },
             method="POST",
         )
         with urlopen(request, timeout=timeout) as response:  # noqa: S310 - configured HTTPS endpoint
-            return response.read()
+            payload = response.read()
+            encoding = response.headers.get("Content-Encoding", "").lower()
+            return gzip.decompress(payload) if encoding == "gzip" else payload
 
 
 _ENDPOINT_DOMAINS = {

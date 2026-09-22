@@ -33,11 +33,17 @@ from alpha_research_os.portfolio.rotation_backtest import (  # noqa: E402
 )
 from alpha_research_os.portfolio.shadow_health import ShadowHealthSpec  # noqa: E402
 from alpha_research_os.portfolio.strategy_backtest import (  # noqa: E402
+    ALL_UNIVERSE_SEGMENTS,
+    UNIVERSE_SEGMENT_NAMES,
     StrategyBacktestRequest,
     preflight,
     preview,
 )
 from alpha_research_os.reporting.factor_catalog_overview import build_factor_catalog_overview  # noqa: E402
+from scripts.data_update import DataUpdateRequest  # noqa: E402
+from scripts.data_update import inventory as data_inventory  # noqa: E402
+from scripts.data_update import plan as data_plan  # noqa: E402
+from scripts.data_update_api import DataUpdateManager  # noqa: E402
 
 
 def strategy_options(project_root: Path) -> dict[str, Any]:
@@ -64,6 +70,10 @@ def strategy_options(project_root: Path) -> dict[str, Any]:
             key=lambda item: (item["source_collection"], item["category"], item["chinese_name"]),
         ),
         "universes": [{"id": "ALL-A-PIT", "name": "历史全 A 股票池"}],
+        "universe_segments": [
+            {"id": segment, "name": UNIVERSE_SEGMENT_NAMES[segment]}
+            for segment in ALL_UNIVERSE_SEGMENTS
+        ],
         "defaults": {
             "target_count": 50,
             "retention_rank": 75,
@@ -165,11 +175,9 @@ class StrategyJobManager:
             runner = "scripts/run_rotation_backtest.py"
         else:
             request = StrategyBacktestRequest.model_validate(payload)
-            # Starting a job must return promptly.  Full Risk Score validation
-            # can take minutes on a new date range and is performed inside the
-            # worker run; the explicit preflight endpoint remains available
-            # when the user wants that synchronous diagnostic first.
-            preflight(self.project_root, request, validate_risk_data=False)
+            # Starting a job must return promptly; the worker performs the
+            # complete backtest after the lightweight request validation.
+            preflight(self.project_root, request)
             runner = "scripts/run_strategy_backtest.py"
         with self.lock:
             if self.running():
@@ -446,6 +454,17 @@ class StrategyJobManager:
                 "remaining_parameter_sets", "current_parameters",
             )
         }
+        listing_request = {"start": request.get("start"), "end": request.get("end")}
+        for field in ("universe_id", "universe_segments", "rebalance_sessions"):
+            if request.get(field) is not None:
+                listing_request[field] = request[field]
+        candidates = request.get("candidates")
+        if isinstance(candidates, list):
+            listing_request["candidates"] = [
+                {"rebalance_sessions": candidate.get("rebalance_sessions")}
+                for candidate in candidates
+                if isinstance(candidate, dict)
+            ]
         return {
             "job_id": job_id,
             "status": status,
@@ -459,7 +478,7 @@ class StrategyJobManager:
             "updated_at": datetime.fromtimestamp(
                 max(path.stat().st_mtime for path in updated_paths if path.exists())
             ).astimezone().isoformat(),
-            "request": {"start": request.get("start"), "end": request.get("end")},
+            "request": listing_request,
             "process_alive": active,
             "elapsed_seconds": max(0, int((datetime.now().astimezone() - created_at).total_seconds())),
             "result_summary": result_summary,
@@ -500,7 +519,8 @@ class StrategyJobManager:
         return {"job_id": job_id, "deleted": True, "deleted_files": deleted}
 
 
-def make_handler(project_root: Path, origins: set[str], manager: StrategyJobManager):
+def make_handler(project_root: Path, origins: set[str], manager: StrategyJobManager,
+                 data_manager: DataUpdateManager | None = None):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
@@ -510,6 +530,20 @@ def make_handler(project_root: Path, origins: set[str], manager: StrategyJobMana
                 return
             if path == "/api/v1/strategy/options":
                 self._json(HTTPStatus.OK, strategy_options(project_root))
+                return
+            if path == "/api/v1/data/inventory":
+                self._json(HTTPStatus.OK, data_inventory(project_root))
+                return
+            if path == "/api/v1/data/jobs/latest" and data_manager is not None:
+                self._json(HTTPStatus.OK, {"job": data_manager.latest()})
+                return
+            if path.startswith("/api/v1/data/jobs/") and data_manager is not None:
+                try:
+                    self._json(HTTPStatus.OK, data_manager.status(path.rsplit("/", 1)[-1]))
+                except FileNotFoundError:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "JOB_NOT_FOUND"})
+                except ValueError as error:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "INVALID_JOB_ID", "detail": str(error)})
                 return
             if path == "/api/v1/rotation/options":
                 self._json(HTTPStatus.OK, rotation_options(project_root))
@@ -551,6 +585,14 @@ def make_handler(project_root: Path, origins: set[str], manager: StrategyJobMana
             try:
                 payload = self._body()
                 parts = path.strip("/").split("/")
+                if path == "/api/v1/data/plan":
+                    self._json(HTTPStatus.OK, data_plan(project_root, DataUpdateRequest.model_validate(payload)))
+                    return
+                if path == "/api/v1/data/jobs" and data_manager is not None:
+                    if manager.running():
+                        raise RuntimeError("a strategy backtest is running; wait before updating the warehouse")
+                    self._json(HTTPStatus.ACCEPTED, data_manager.start(payload))
+                    return
                 if len(parts) == 6 and parts[:4] == ["api", "v1", "strategy", "jobs"] and parts[5] == "stop":
                     self._json(HTTPStatus.OK, manager.stop(parts[4]))
                     return
@@ -579,6 +621,8 @@ def make_handler(project_root: Path, origins: set[str], manager: StrategyJobMana
                     )
                     return
                 if path == "/api/v1/rotation/jobs":
+                    if data_manager is not None and data_manager.running():
+                        raise RuntimeError("a data update is running; wait before starting a backtest")
                     self._json(HTTPStatus.ACCEPTED, manager.start(payload))
                     return
                 request = StrategyBacktestRequest.model_validate(payload)
@@ -586,6 +630,8 @@ def make_handler(project_root: Path, origins: set[str], manager: StrategyJobMana
                     self._json(HTTPStatus.OK, preflight(project_root, request))
                     return
                 if path == "/api/v1/strategy/jobs":
+                    if data_manager is not None and data_manager.running():
+                        raise RuntimeError("a data update is running; wait before starting a backtest")
                     self._json(HTTPStatus.ACCEPTED, manager.start(payload))
                     return
                 self._json(HTTPStatus.NOT_FOUND, {"error": "NOT_FOUND"})
@@ -666,7 +712,8 @@ def main() -> int:
     root = args.project_root.resolve()
     origins = set(args.allow_origin or ("http://127.0.0.1:8872", "http://localhost:8872"))
     manager = StrategyJobManager(root)
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(root, origins, manager))
+    data_manager = DataUpdateManager(root)
+    server = ThreadingHTTPServer((args.host, args.port), make_handler(root, origins, manager, data_manager))
     print(f"Strategy backtest API: http://{args.host}:{args.port}", flush=True)
     server.serve_forever()
     return 0

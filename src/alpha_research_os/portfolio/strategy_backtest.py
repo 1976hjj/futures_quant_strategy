@@ -51,12 +51,24 @@ class FilterRule(FrozenSpec):
     missing_policy: Literal["EXCLUDE", "KEEP"] = "EXCLUDE"
 
 
+UniverseSegment = Literal["SH_MAIN", "SZ_MAIN", "CHINEXT", "STAR", "BSE"]
+ALL_UNIVERSE_SEGMENTS: tuple[UniverseSegment, ...] = ("SH_MAIN", "SZ_MAIN", "CHINEXT", "STAR", "BSE")
+UNIVERSE_SEGMENT_NAMES: dict[UniverseSegment, str] = {
+    "SH_MAIN": "沪市主板",
+    "SZ_MAIN": "深市主板",
+    "CHINEXT": "创业板",
+    "STAR": "科创板",
+    "BSE": "北交所",
+}
+
+
 class StrategyBacktestRequest(FrozenSpec):
     schema_version: Literal["1"] = "1"
     name: str = Field(min_length=1, max_length=100)
     start: date
     end: date
     universe_id: Literal["ALL-A-PIT"] = "ALL-A-PIT"
+    universe_segments: tuple[UniverseSegment, ...] = ALL_UNIVERSE_SEGMENTS
     selection_sequence_mode: Literal["ACTUAL_POSITIONS", "MODEL_TARGETS"] = "ACTUAL_POSITIONS"
     score_rules: tuple[ScoreRule, ...] = Field(min_length=1, max_length=12)
     filter_rules: tuple[FilterRule, ...] = Field(default=(), max_length=12)
@@ -87,6 +99,10 @@ class StrategyBacktestRequest(FrozenSpec):
             raise ValueError("end must not precede start")
         if self.retention_rank < self.target_count:
             raise ValueError("retention_rank must be at least target_count")
+        if not self.universe_segments:
+            raise ValueError("select at least one stock-market segment")
+        if len(set(self.universe_segments)) != len(self.universe_segments):
+            raise ValueError("stock-market segments must not repeat")
         if len({rule.factor_id for rule in self.score_rules}) != len(self.score_rules):
             raise ValueError("score factors must be unique")
         if len({rule.factor_id for rule in self.filter_rules}) != len(self.filter_rules):
@@ -104,6 +120,20 @@ def _sql_string(value: str) -> str:
 
 def _sql_path(value: Path) -> str:
     return value.resolve().as_posix().replace("'", "''")
+
+
+def _universe_segment_predicate(segments: tuple[UniverseSegment, ...], alias: str = "u") -> str:
+    """Return the stable code-based board filter applied after PIT universe membership."""
+
+    clauses = {
+        "SH_MAIN": f"({alias}.ts_code LIKE '600%.SH' OR {alias}.ts_code LIKE '601%.SH' "
+                   f"OR {alias}.ts_code LIKE '603%.SH' OR {alias}.ts_code LIKE '605%.SH')",
+        "SZ_MAIN": f"{alias}.ts_code LIKE '00%.SZ'",
+        "CHINEXT": f"({alias}.ts_code LIKE '300%.SZ' OR {alias}.ts_code LIKE '301%.SZ')",
+        "STAR": f"({alias}.ts_code LIKE '688%.SH' OR {alias}.ts_code LIKE '689%.SH')",
+        "BSE": f"{alias}.ts_code LIKE '%.BJ'",
+    }
+    return "(" + " OR ".join(clauses[item] for item in segments) + ")"
 
 
 def _manifest(project_root: Path, release_id: str) -> tuple[dict[str, Any], Path]:
@@ -155,7 +185,7 @@ def _factor_release_candidates(project_root: Path, factor_id: str) -> list[dict[
 
 
 def _resolve_inputs(project_root: Path, request: StrategyBacktestRequest) -> list[dict[str, Any]]:
-    """Choose the widest published release that fully covers the requested range.
+    """Choose the latest published release that fully covers the requested range.
 
     The browser's stored release ID is deliberately not a hard dependency. It is
     an audit hint from when the user configured the strategy; the strategy itself
@@ -180,10 +210,10 @@ def _resolve_inputs(project_root: Path, request: StrategyBacktestRequest) -> lis
         by_factor[factor_id] = max(
             compatible,
             key=lambda item: (
+                item["created_at"],
                 (item["end"] - item["start"]).days,
                 item["end"].toordinal(),
                 -item["start"].toordinal(),
-                item["created_at"],
                 item["release_id"],
             ),
         )
@@ -210,8 +240,6 @@ def _effective_request(request: StrategyBacktestRequest, resolved: list[dict[str
 def preflight(
     project_root: Path,
     request: StrategyBacktestRequest,
-    *,
-    validate_risk_data: bool = True,
 ) -> dict[str, Any]:
     resolved = _resolve_inputs(project_root, request)
     effective_request = _effective_request(request, resolved)
@@ -230,15 +258,15 @@ def preflight(
         ).fetchone()[0]
     if session_count < 2:
         raise ValueError("backtest range must contain at least two trading sessions")
-    warnings = ["??????????????????????"]
+    warnings = ["因子信号在当日收盘后形成，交易按下一交易日开盘执行。"]
     if request.rebalance_sessions == 1:
-        warnings.append("??????????????????????????")
+        warnings.append("每日调仓可能增加换手和交易成本，请结合容量结果判断。")
     if (
         request.shadow_health.experiment_variant == "S4V3"
         and request.selection_sequence_mode == "ACTUAL_POSITIONS"
     ):
         warnings.append(
-            "??????????????????????????????????????????"
+            "S4-V3 先运行同参数 S0 影子账户，再根据前一日收盘状态调整真实仓位。"
         )
     result = {
         "status": "READY",
@@ -340,99 +368,6 @@ def _is_pit_abnormal_security(
     return name.startswith("*") or status_prefix or "退" in name
 
 
-def _adjusted_ma_states(
-    connection: duckdb.DuckDBPyConnection,
-    signal_date: date,
-    securities: set[str],
-    ma_sessions: int,
-) -> dict[str, dict[str, float | int | bool]]:
-    """Calculate each security's MA state using adjusted closes available by T close."""
-    if not securities:
-        return {}
-    codes = sorted(securities)
-    placeholders = ",".join("?" for _ in codes)
-    rows = connection.execute(
-        f"""WITH ranked AS (
-          SELECT m.ts_code, m.trade_date, m.close * a.adj_factor AS adjusted_close,
-                 row_number() OVER (
-                   PARTITION BY m.ts_code ORDER BY m.trade_date DESC
-                 ) AS reverse_rank
-          FROM research.market_daily m
-          JOIN research.adj_factor a USING (trade_date, ts_code)
-          WHERE m.trade_date <= ? AND m.ts_code IN ({placeholders})
-            AND m.close > 0 AND a.adj_factor > 0
-        )
-        SELECT ts_code, count(*) AS observations, avg(adjusted_close) AS moving_average,
-               max(CASE WHEN trade_date=? THEN adjusted_close END) AS adjusted_close
-        FROM ranked WHERE reverse_rank <= ? GROUP BY ts_code""",
-        [signal_date, *codes, signal_date, ma_sessions],
-    ).fetchall()
-    states: dict[str, dict[str, float | int | bool]] = {}
-    for code, observations, moving_average, adjusted_close in rows:
-        ready = int(observations) >= ma_sessions and adjusted_close is not None
-        states[str(code)] = {
-            "observations": int(observations),
-            "moving_average": float(moving_average),
-            "adjusted_close": float(adjusted_close) if adjusted_close is not None else 0.0,
-            "eligible": bool(ready and float(adjusted_close) > float(moving_average)),
-        }
-    return states
-
-
-def _attach_adjusted_ma_states(
-    connection: duckdb.DuckDBPyConnection,
-    end: date,
-    securities: set[str],
-    ma_sessions: int,
-    cache: dict[str, dict[date, dict[str, Any]]],
-) -> None:
-    """Attach PIT rolling-MA states to already-prefetched future market rows."""
-    if not securities:
-        return
-    cached_dates = [
-        trade_date
-        for code in securities
-        for trade_date in cache.get(code, {})
-    ]
-    if not cached_dates:
-        return
-    start = min(cached_dates)
-    codes = sorted(securities)
-    placeholders = ",".join("?" for _ in codes)
-    rows = connection.execute(
-        f"""WITH adjusted AS (
-          SELECT m.ts_code, m.trade_date, m.close * a.adj_factor AS adjusted_close
-          FROM research.market_daily m
-          JOIN research.adj_factor a USING (trade_date, ts_code)
-          WHERE m.trade_date <= ? AND m.ts_code IN ({placeholders})
-            AND m.close > 0 AND a.adj_factor > 0
-        ), rolling AS (
-          SELECT ts_code, trade_date, adjusted_close,
-                 avg(adjusted_close) OVER (
-                   PARTITION BY ts_code ORDER BY trade_date
-                   ROWS BETWEEN ? PRECEDING AND CURRENT ROW
-                 ) AS moving_average,
-                 count(*) OVER (
-                   PARTITION BY ts_code ORDER BY trade_date
-                   ROWS BETWEEN ? PRECEDING AND CURRENT ROW
-                 ) AS observations
-          FROM adjusted
-        )
-        SELECT ts_code, trade_date, adjusted_close, moving_average, observations
-        FROM rolling WHERE trade_date BETWEEN ? AND ?""",
-        [end, *codes, ma_sessions - 1, ma_sessions - 1, start, end],
-    ).fetchall()
-    for code, trade_date, adjusted_close, moving_average, observations in rows:
-        payload = cache.get(str(code), {}).get(trade_date)
-        if payload is None:
-            continue
-        ready = int(observations) >= ma_sessions
-        payload["trend_ma_observations"] = int(observations)
-        payload["trend_ma_adjusted_close"] = float(adjusted_close)
-        payload["trend_ma_value"] = float(moving_average)
-        payload["trend_ma_eligible"] = bool(ready and adjusted_close > moving_average)
-
-
 def _signal_rows(
     connection: duckdb.DuckDBPyConnection,
     resolved: list[dict[str, Any]],
@@ -464,7 +399,8 @@ def _signal_rows(
             f"""SELECT u.ts_code, u.security_name, u.name_is_point_in_time,
             u.is_st, u.listed_session_number,
             {', '.join(values)} FROM research.universe_daily u {' '.join(joins)}
-            WHERE u.trade_date=? AND u.eligible_for_signal ORDER BY u.ts_code""",
+            WHERE u.trade_date=? AND u.eligible_for_signal
+            AND {_universe_segment_predicate(request.universe_segments)} ORDER BY u.ts_code""",
             [signal_date],
         ).fetchall()
     columns = [item[0] for item in connection.description]
@@ -481,6 +417,7 @@ def _signal_rows(
 def _prepare_signal_table(
     connection: duckdb.DuckDBPyConnection,
     resolved: list[dict[str, Any]],
+    request: StrategyBacktestRequest,
     signal_sessions: set[date],
     cache_path: Path | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
@@ -530,7 +467,8 @@ def _prepare_signal_table(
             SELECT u.trade_date, u.ts_code, u.security_name, u.name_is_point_in_time,
             u.is_st, u.listed_session_number,
             {', '.join(values)} FROM research.universe_daily u {' '.join(joins)}
-            WHERE u.eligible_for_signal AND u.trade_date IN ({dates})"""
+            WHERE u.eligible_for_signal AND {_universe_segment_predicate(request.universe_segments)}
+            AND u.trade_date IN ({dates})"""
         )
     finally:
         finished.set()
@@ -556,19 +494,20 @@ def _prepare_signal_table(
 
 
 def _signal_cache_path(
-    project_root: Path, resolved: list[dict[str, Any]], signal_sessions: set[date]
+    project_root: Path, resolved: list[dict[str, Any]], request: StrategyBacktestRequest, signal_sessions: set[date]
 ) -> Path:
     """Return a cache path that is invalidated when factor or warehouse inputs change."""
     warehouse = project_root / "data" / "warehouse" / "alpha_research.duckdb"
     fingerprint = warehouse.stat()
     cache_key = content_hash(
         {
-            "schema": "strategy-signal-cache-v2",
+            "schema": "strategy-signal-cache-v3",
             "factors": [
                 {"factor_id": item["factor_id"], "release_id": item["release_id"]}
                 for item in resolved
             ],
             "signal_sessions": [item.isoformat() for item in sorted(signal_sessions)],
+            "universe_segments": request.universe_segments,
             "warehouse_size": fingerprint.st_size,
             "warehouse_mtime_ns": fingerprint.st_mtime_ns,
         }
@@ -726,7 +665,7 @@ def _pit_industry_by_code(
 
 
 def preview(project_root: Path, request: StrategyBacktestRequest, signal_date: date) -> dict[str, Any]:
-    checked = preflight(project_root, request, validate_risk_data=False)
+    checked = preflight(project_root, request)
     if not request.start <= signal_date <= request.end:
         raise ValueError("preview date must stay inside the backtest range")
     resolved = _resolve_inputs(project_root, request)
@@ -841,6 +780,32 @@ def _max_drawdown(values: list[float]) -> float:
         peak = max(peak, value)
         worst = min(worst, value / peak - 1)
     return worst
+
+
+def _shadow_timeline(
+    source_daily: list[dict[str, Any]],
+    managed_daily: list[dict[str, Any]],
+    initial_cash: float,
+) -> list[dict[str, Any]]:
+    """Keep the S0 signal account and managed exposure on the same trading dates."""
+    source_by_session = {row["session"]: row for row in source_daily}
+    if len(source_by_session) != len(managed_daily) or initial_cash <= 0:
+        raise ValueError("shadow and managed daily series must share a valid calendar")
+    peak = initial_cash
+    timeline = []
+    for managed in managed_daily:
+        session = managed["session"]
+        if session not in source_by_session:
+            raise ValueError(f"shadow daily series is missing {session}")
+        nav = float(source_by_session[session]["nav"])
+        peak = max(peak, nav)
+        timeline.append({
+            "session": session,
+            "shadow_return": nav / initial_cash - 1,
+            "shadow_drawdown": nav / peak - 1,
+            "target_exposure": float(managed["target_shadow_exposure"]),
+        })
+    return timeline
 
 
 def _maximum_drawdown_period(daily: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -988,31 +953,38 @@ def run_backtest(
     include_selection_history: bool = False,
     maximum_industry_weight: float | None = None,
     missing_industry_policy: Literal["UNKNOWN_BUCKET", "EXCLUDE"] = "UNKNOWN_BUCKET",
-    health_breadth_sessions: int | None = None,
     shadow_source_override: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    checked = preflight(project_root, request, validate_risk_data=False)
+    checked = preflight(project_root, request)
     resolved = _resolve_inputs(project_root, request)
     request = _effective_request(request, resolved)
     database = project_root / "data" / "warehouse" / "alpha_research.duckdb"
     shadow_source_result: dict[str, Any] | None = shadow_source_override
     if request.shadow_health.experiment_variant == "S4V3" and shadow_source_result is None:
         if progress_callback:
-            progress_callback({"phase": "????????", "progress": 3})
+            progress_callback({"phase": "准备影子基线回测", "progress": 3})
         source_request = request.model_copy(
             update={
-                "name": f"{request.name} ? ??????",
+                "name": f"{request.name} · S0影子基线",
                 "shadow_health": request.shadow_health.model_copy(
                     update={"experiment_variant": "S0"}
                 ),
             }
         )
+        def shadow_progress(detail: dict[str, Any]) -> None:
+            if progress_callback:
+                progress_callback({
+                    **detail,
+                    "phase": f"影子基线：{detail.get('phase') or '准备数据'}",
+                    "progress": min(9, 3 + round(float(detail.get("progress") or 0) * 0.06)),
+                })
+
         shadow_source_result = run_backtest(
             project_root,
             source_request,
-            None,
             market_data_mode=market_data_mode,
             target_schedule=target_schedule,
+            progress_callback=shadow_progress,
             include_selection_history=False,
             maximum_industry_weight=maximum_industry_weight,
             missing_industry_policy=missing_industry_policy,
@@ -1091,7 +1063,7 @@ def run_backtest(
         signal_cache = (
             None
             if target_schedule is not None
-            else _signal_cache_path(project_root, resolved, selection_signal_sessions)
+            else _signal_cache_path(project_root, resolved, request, selection_signal_sessions)
         )
         if progress_callback:
             progress_callback(
@@ -1106,7 +1078,9 @@ def run_backtest(
                 }
             )
         if target_schedule is None:
-            _prepare_signal_table(connection, resolved, selection_signal_sessions, signal_cache, progress_callback)
+            _prepare_signal_table(
+                connection, resolved, request, selection_signal_sessions, signal_cache, progress_callback
+            )
         if progress_callback:
             progress_callback({"phase": "连续账户回放", "progress": 18})
         positions: dict[str, int] = {}
@@ -1152,27 +1126,6 @@ def run_backtest(
                 missing = {code for code, bar in bars.items() if not bar}
                 if missing:
                     bars.update(_market_rows(connection, session, missing))
-            health_ma_sessions = health_breadth_sessions
-            if health_ma_sessions is not None:
-                missing_trend_state = {
-                    code
-                    for code in positions
-                    if "trend_ma_observations" not in bars.get(code, {})
-                }
-                if missing_trend_state:
-                    for code, state in _adjusted_ma_states(
-                        connection,
-                        session,
-                        missing_trend_state,
-                        health_ma_sessions,
-                    ).items():
-                        bar = bars.get(code)
-                        if bar is None:
-                            continue
-                        bar["trend_ma_observations"] = state["observations"]
-                        bar["trend_ma_adjusted_close"] = state["adjusted_close"]
-                        bar["trend_ma_value"] = state["moving_average"]
-                        bar["trend_ma_eligible"] = state["eligible"]
             day_dividend_cash = 0.0
             for code, quantity in list(positions.items()):
                 bar = bars.get(code, {})
@@ -1265,6 +1218,11 @@ def run_backtest(
                     "realized_pnl_cny": realized_pnl,
                     "realized_pnl_pct": realized_pnl_pct,
                     "post_quantity": positions.get(code, 0),
+                    "post_average_cost_price": (
+                        round(position_costs[code] / positions[code], 6)
+                        if positions.get(code)
+                        else None
+                    ),
                     **_post_trade_exposure(positions, cash, marks, code),
                 }
                 if execution_reason is not None:
@@ -1386,6 +1344,9 @@ def run_backtest(
                                 "realized_pnl_cny": None,
                                 "realized_pnl_pct": None,
                                 "post_quantity": positions[code],
+                                "post_average_cost_price": round(
+                                    position_costs[code] / positions[code], 6
+                                ),
                                 **_post_trade_exposure(positions, cash, intraday_marks, code),
                             }
                         )
@@ -1432,6 +1393,7 @@ def run_backtest(
                             "realized_pnl_cny": realized_pnl,
                             "realized_pnl_pct": realized_pnl / allocated_cost if allocated_cost else None,
                             "post_quantity": 0,
+                            "post_average_cost_price": None,
                             "execution_reason": (
                                 "DELISTING_LIQUIDATION"
                                 if close_price > 0
@@ -1459,18 +1421,6 @@ def run_backtest(
             nav = _cash(cash + closing_value)
             previous_nav = daily[-1]["nav"] if daily else request.initial_cash_cny
             daily_return = nav / previous_nav - 1 if previous_nav else 0.0
-            shadow_position_breadth = None
-            if health_breadth_sessions is not None and positions:
-                ready_states = [
-                    bars.get(code, {})
-                    for code in positions
-                    if int(bars.get(code, {}).get("trend_ma_observations") or 0)
-                    >= health_breadth_sessions
-                ]
-                if ready_states:
-                    shadow_position_breadth = sum(
-                        state.get("trend_ma_eligible") is True for state in ready_states
-                    ) / len(ready_states)
             total_cost = _cash(total_cost + day_cost)
             total_turnover_notional = _cash(total_turnover_notional + day_notional)
             daily.append(
@@ -1483,7 +1433,6 @@ def run_backtest(
                     "target_shadow_exposure": current_shadow_exposure,
                     "target_combined_exposure": current_shadow_exposure,
                     "actual_stock_exposure": closing_value / nav if nav else 0.0,
-                    "shadow_position_breadth": shadow_position_breadth,
                 }
             )
 
@@ -1566,14 +1515,6 @@ def run_backtest(
                     _prefetch_market_rows(
                         connection, next_session, sessions[-1], uncached, market_cache
                     )
-                    if health_breadth_sessions is not None:
-                        _attach_adjusted_ma_states(
-                            connection,
-                            sessions[-1],
-                            uncached,
-                            health_breadth_sessions,
-                            market_cache,
-                        )
 
             if market_data_mode == "prefetch":
                 # Once a name has neither a live position nor a pending order,
@@ -1735,6 +1676,9 @@ def run_backtest(
                 "average_actual_stock_exposure"
             ],
         }
+        result["shadow_health"]["timeline"] = _shadow_timeline(
+            shadow_source_result["daily"], daily, request.initial_cash_cny
+        )
     if include_selection_history:
         result["selection_history"] = selection_history
     return result

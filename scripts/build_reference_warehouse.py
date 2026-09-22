@@ -240,14 +240,17 @@ def _sql_path(path: Path) -> str:
 def _assert_complete(checkpoint: dict[str, Any]) -> None:
     completed = checkpoint["completed"]
     sessions = [str(value) for value in checkpoint["open_sessions"]]
-    if len(completed["trade_cal"]) != 1:
-        raise ValueError("M2-B archive must contain one canonical trading calendar")
+    if not completed["trade_cal"]:
+        raise ValueError("M2-B archive has no trading calendar")
     coverage = checkpoint["coverage"]
-    expected_name_ranges = {
-        f"range:{year:04d}"
-        for year in range(int(coverage["start"][:4]), int(coverage["end"][:4]) + 1)
-    }
-    if len(completed["stock_basic"]) != 5 or not expected_name_ranges.issubset(completed["namechange"]):
+    name_ranges = completed["namechange"]
+    missing_name_years = [
+        year for year in range(int(coverage["start"][:4]), int(coverage["end"][:4]) + 1)
+        if not any(key.startswith(f"range:{year:04d}") for key in name_ranges)
+    ]
+    latest_master_date = max(key[:8] for key in completed["stock_basic"])
+    latest_master = [key for key in completed["stock_basic"] if key.startswith(latest_master_date)]
+    if len(latest_master) != 5 or missing_name_years:
         raise ValueError("security master or name history snapshot is incomplete")
     missing_suspend = set(sessions) - set(completed["suspend_d"])
     st_sessions = {session for session in sessions if session >= "20000101"}
@@ -466,6 +469,9 @@ def build(archive: Path, warehouse: Path) -> dict[str, Any]:
     for api_name, entries in checkpoint["completed"].items():
         dataset = API_TO_DATASET[api_name]
         selected_entries = entries.items()
+        if api_name == "stock_basic":
+            latest_date = max(key[:8] for key in entries)
+            selected_entries = ((key, entry) for key, entry in entries.items() if key.startswith(latest_date))
         if api_name == "namechange" and any(key.startswith("range:") for key in entries):
             selected_entries = ((key, entry) for key, entry in entries.items() if key.startswith("range:"))
         for _, entry in sorted(selected_entries):

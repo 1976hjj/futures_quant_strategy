@@ -78,7 +78,7 @@ def _read_entry(root: Path, ts_code: str, entry: dict[str, Any]) -> list[dict[st
     if not isinstance(fields, list) or not isinstance(items, list) or len(items) != entry["rows"]:
         raise ValueError(f"invalid tabular payload or row count: {ts_code}")
     rows = [dict(zip(fields, item, strict=True)) for item in items]
-    if any(str(row.get("ts_code")) != ts_code for row in rows):
+    if not ts_code.startswith("day:") and any(str(row.get("ts_code")) != ts_code for row in rows):
         raise ValueError(f"partition contains another security: {ts_code}")
     return rows
 

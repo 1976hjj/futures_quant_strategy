@@ -11,7 +11,7 @@ import time
 import traceback
 import uuid
 from collections.abc import Callable
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from http.client import IncompleteRead
 from pathlib import Path
 from typing import Any
@@ -132,8 +132,9 @@ def _load_checkpoint(path: Path, *, endpoint: str, start: date, end: date) -> di
         raise ValueError("unsupported M2-C checkpoint schema")
     if state.get("api_base_url") != endpoint:
         raise ValueError("M2-C checkpoint belongs to another endpoint")
-    if state.get("coverage") != {"end": end.isoformat(), "start": start.isoformat()}:
-        raise ValueError("coverage changes require a new M2-C archive or an explicit migration")
+    coverage = state.get("coverage") or {}
+    if coverage.get("start") != start.isoformat() or end < date.fromisoformat(coverage["end"]):
+        raise ValueError("M2-C coverage may only extend its existing end date")
     state.setdefault("completed", {}).setdefault("dividend", {})
     return state
 
@@ -179,6 +180,7 @@ def backfill(
     codes: tuple[str, ...],
     min_free_gb: float,
     sleep_seconds: float,
+    incremental_daily: bool = False,
 ) -> dict[str, Any]:
     if start > end:
         raise ValueError("start must not be after end")
@@ -187,8 +189,56 @@ def backfill(
     output.mkdir(parents=True, exist_ok=True)
     checkpoint_path = output / "checkpoint.json"
     state = _load_checkpoint(checkpoint_path, endpoint=provider.spec.api_base_url, start=start, end=end)
+    previous_end = date.fromisoformat(state["coverage"]["end"])
     completed = state["completed"]["dividend"]
     raw_store = RawSnapshotStore(ArtifactStore(output / "artifacts"))
+    if incremental_daily:
+        fetched = 0
+        first = previous_end + timedelta(days=1)
+        days = (end - first).days + 1
+        for offset in range(max(0, days)):
+            day = first + timedelta(days=offset)
+            key = f"day:{day:%Y%m%d}"
+            if key in completed:
+                continue
+            free_gb = shutil.disk_usage(output).free / (1024**3)
+            if free_gb < min_free_gb:
+                raise RuntimeError(f"disk safety stop: {free_gb:.2f} GiB is below {min_free_gb:.2f} GiB")
+            request = FetchRequest(
+                request_id=f"M2C-DIVIDEND-DAY-{day:%Y%m%d}",
+                data_domain=DataDomain.CORPORATE_ACTION,
+                start=day, end=day, fields=FIELDS,
+                parameters=("api_name=dividend",),
+            )
+            response = _fetch_with_retry(provider, request, observer=_retry_observer(output, key))
+            rows = tushare_response_rows(response.payload)
+            if len(rows) >= 5000:
+                raise RuntimeError(f"dividend day {day} reached provider row cap")
+            if any(str(row.get("ann_date")) != day.strftime("%Y%m%d") for row in rows):
+                raise RuntimeError(f"dividend day {day} returned a different announcement date")
+            snapshot = raw_store.capture(provider.spec, response, storage_encoding="gzip")
+            completed[key] = {
+                "payload_artifact_id": snapshot.reference.payload_artifact_id,
+                "raw_bytes": snapshot.reference.uncompressed_byte_size,
+                "retrieved_at": snapshot.reference.retrieved_at.isoformat(),
+                "rows": len(rows),
+                "snapshot_id": snapshot.reference.snapshot_id,
+                "stored_bytes": snapshot.payload_reference.byte_size,
+            }
+            fetched += 1
+            _atomic_write(checkpoint_path, canonical_json_bytes(state))
+            _save_status(output, status="RUNNING", completed_partitions=offset + 1,
+                         expected_partitions=max(0, days), partition=key)
+            if sleep_seconds:
+                time.sleep(sleep_seconds)
+        state["coverage"] = {"start": start.isoformat(), "end": end.isoformat()}
+        _atomic_write(checkpoint_path, canonical_json_bytes(state))
+        summary = {"coverage": state["coverage"], "fetched_this_run": fetched,
+                   "totals": {"dividend": {"partitions": len(completed),
+                                            "rows": sum(int(item["rows"]) for item in completed.values())}}}
+        _atomic_write(output / "latest_summary.json", canonical_json_bytes(summary))
+        _save_status(output, status="COMPLETED", summary=summary)
+        return summary
     ordered_codes = tuple(sorted(codes))
     skipped = sum(code in completed for code in ordered_codes)
     fetched = 0
@@ -270,6 +320,7 @@ def main() -> int:
     parser.add_argument("--max-securities", type=int)
     parser.add_argument("--min-free-gb", type=float, default=30.0)
     parser.add_argument("--sleep-ms", type=float, default=100.0)
+    parser.add_argument("--incremental-daily", action="store_true")
     args = parser.parse_args()
     token = os.environ.get(args.token_env)
     if not token:
@@ -287,6 +338,7 @@ def main() -> int:
             codes=codes,
             min_free_gb=args.min_free_gb,
             sleep_seconds=args.sleep_ms / 1000,
+            incremental_daily=args.incremental_daily,
         )
     except Exception as error:
         _save_status(

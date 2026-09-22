@@ -405,18 +405,27 @@ def backfill(
     min_free_gb: float,
     sleep_seconds: float,
     max_tasks: int | None = None,
+    apis: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     sessions, periods, securities = _load_inputs(reference, financial, database)
     tasks = _tasks(start, end, sessions, periods, securities)
+    if apis is not None:
+        unknown = set(apis) - set((*CORE_APIS, *IMPORTANT_APIS))
+        if unknown:
+            raise ValueError(f"unknown M2-E APIs: {sorted(unknown)}")
+        tasks = [task for task in tasks if task.api in apis]
     if max_tasks is not None:
         tasks = tasks[:max_tasks]
     checkpoint_path = output / "checkpoint.json"
     output.mkdir(parents=True, exist_ok=True)
     expected = _new_checkpoint(provider.spec.api_base_url, start, end, len(tasks))
     state = json.loads(checkpoint_path.read_bytes()) if checkpoint_path.exists() else expected
-    for field in ("api_base_url", "coverage", "schema"):
+    for field in ("api_base_url", "schema"):
         if state.get(field) != expected[field]:
             raise ValueError(f"M2-E checkpoint configuration differs: {field}")
+    previous_coverage = state.get("coverage") or {}
+    if previous_coverage.get("start") != start.isoformat() or end < date.fromisoformat(previous_coverage["end"]):
+        raise ValueError("M2-E coverage may only extend its existing end date")
     state["expected_base_partitions"] = max(int(state.get("expected_base_partitions", 0)), len(tasks))
     for api in (*CORE_APIS, *IMPORTANT_APIS):
         state.setdefault("completed", {}).setdefault(api, {})
@@ -521,6 +530,9 @@ def backfill(
         api: {"partitions": len(entries), "rows": sum(int(entry["rows"]) for entry in entries.values())}
         for api, entries in state["completed"].items()
     }
+    if max_tasks is None:
+        state["coverage"] = {"start": start.isoformat(), "end": end.isoformat()}
+        _atomic_write(checkpoint_path, canonical_json_bytes(state))
     summary = {"coverage": state["coverage"], "fetched_this_run": fetched, "totals": totals}
     _atomic_write(output / "latest_summary.json", canonical_json_bytes(summary))
     _save_status(output, status="COMPLETED", summary=summary)
@@ -539,6 +551,7 @@ def main() -> int:
     parser.add_argument("--min-free-gb", type=float, default=30.0)
     parser.add_argument("--sleep-ms", type=float, default=100.0)
     parser.add_argument("--max-tasks", type=int)
+    parser.add_argument("--api", action="append", choices=sorted((*CORE_APIS, *IMPORTANT_APIS)))
     args = parser.parse_args()
     token = os.environ.get("TUSHARE_TOKEN")
     if not token:
@@ -555,6 +568,7 @@ def main() -> int:
             min_free_gb=args.min_free_gb,
             sleep_seconds=args.sleep_ms / 1000,
             max_tasks=args.max_tasks,
+            apis=tuple(args.api) if args.api else None,
         )
     except Exception as error:
         _save_status(

@@ -5,6 +5,7 @@ from datetime import date, datetime
 
 from alpha_research_os.data.providers.tushare import TushareProvider
 from scripts.backfill_tushare_corporate_actions import FIELDS, backfill
+from scripts.build_corporate_action_warehouse import _read_entry
 
 RETRIEVED_AT = datetime.fromisoformat("2026-09-01T18:00:00+08:00")
 
@@ -74,3 +75,30 @@ def test_corporate_action_backfill_is_per_security_checkpointed_and_secret_free(
     assert second["fetched_this_run"] == 0
     assert second["skipped_this_run"] == 2
     assert len(transport.calls) == 2
+
+
+def test_dividend_increment_fetches_only_new_announcement_dates(tmp_path) -> None:
+    class DailyTransport(_DividendTransport):
+        def post(self, url: str, payload: bytes, *, timeout: float) -> bytes:
+            request = json.loads(payload)
+            if "ann_date" in request["params"]:
+                self.calls.append(request)
+                day = request["params"]["ann_date"]
+                row = {"ts_code": "000001.SZ", "ann_date": day, "end_date": "20260630"}
+                return json.dumps({"code": 0, "data": {"fields": list(FIELDS),
+                                   "items": [[row.get(field) for field in FIELDS]]}}).encode()
+            return super().post(url, payload, timeout=timeout)
+
+    transport = DailyTransport()
+    provider = TushareProvider(token="test-secret", api_base_url="https://gateway.example.invalid/",
+                               transport=transport, clock=lambda: RETRIEVED_AT)
+    archive = tmp_path / "corporate-actions"
+    common = dict(provider=provider, start=date(1990, 12, 19), output=archive,
+                  codes=("000001.SZ",), min_free_gb=0, sleep_seconds=0)
+    backfill(**common, end=date(2026, 9, 1))
+    result = backfill(**common, end=date(2026, 9, 3), incremental_daily=True)
+    state = json.loads((archive / "checkpoint.json").read_bytes())
+    assert result["fetched_this_run"] == 2
+    assert set(state["completed"]["dividend"]) == {"000001.SZ", "day:20260902", "day:20260903"}
+    assert _read_entry(archive / "artifacts", "day:20260902", state["completed"]["dividend"]["day:20260902"])[0]["ann_date"] == "20260902"
+    assert backfill(**common, end=date(2026, 9, 3), incremental_daily=True)["fetched_this_run"] == 0

@@ -126,9 +126,15 @@ def _load_checkpoint(
         return _new_checkpoint(endpoint, start, end, apis, periods, page_size)
     state = json.loads(path.read_bytes())
     expected = _new_checkpoint(endpoint, start, end, apis, periods, page_size)
-    for field in ("api_base_url", "apis", "coverage", "periods", "page_size", "schema"):
+    for field in ("api_base_url", "apis", "page_size", "schema"):
         if state.get(field) != expected[field]:
             raise ValueError(f"M2-D checkpoint configuration differs: {field}")
+    coverage = state.get("coverage") or {}
+    old_periods = state.get("periods") or []
+    if (coverage.get("start") != start.isoformat()
+            or end < date.fromisoformat(coverage["end"])
+            or list(periods[:len(old_periods)]) != old_periods):
+        raise ValueError("M2-D coverage and periods may only extend forward")
     for api in apis:
         state.setdefault("completed", {}).setdefault(api, {})
         state.setdefault("terminal_offsets", {}).setdefault(api, {})
@@ -205,6 +211,7 @@ def backfill(
     page_size: int,
     min_free_gb: float,
     sleep_seconds: float,
+    refresh_recent_periods: int = 0,
 ) -> dict[str, Any]:
     if not periods or page_size <= 0:
         raise ValueError("periods must be nonempty and page_size must be positive")
@@ -221,6 +228,8 @@ def backfill(
         periods=periods,
         page_size=page_size,
     )
+    previous_end = date.fromisoformat(state["coverage"]["end"])
+    state["periods"] = list(periods)
     raw_store = RawSnapshotStore(ArtifactStore(output / "artifacts"))
     fetched = 0
     skipped = sum(len(partitions) for partitions in state["completed"].values())
@@ -293,6 +302,40 @@ def backfill(
                     break
                 offset += page_size
 
+    if refresh_recent_periods and end > previous_end:
+        for api in apis:
+            for period in periods[-refresh_recent_periods:]:
+                offset = 0
+                while True:
+                    key = f"{period}:refresh:{end:%Y%m%d}:offset={offset}"
+                    existing = state["completed"][api].get(key)
+                    if existing is None:
+                        free_gb = shutil.disk_usage(output).free / (1024**3)
+                        if free_gb < min_free_gb:
+                            raise RuntimeError(f"disk safety stop: {free_gb:.2f} GiB is below {min_free_gb:.2f} GiB")
+                        response = _fetch_with_retry(provider, _request(api, period, offset, page_size),
+                                                     _observer(output, api, key))
+                        document = json.loads(response.payload)
+                        fields = document.get("data", {}).get("fields")
+                        items = document.get("data", {}).get("items")
+                        if not isinstance(fields, list) or not isinstance(items, list):
+                            raise ValueError(f"invalid financial refresh response: {api}/{key}")
+                        rows = tushare_response_rows(response.payload)
+                        if any(str(row.get("end_date")) != period for row in rows):
+                            raise ValueError(f"financial row period differs from refresh partition: {api}/{key}")
+                        snapshot = raw_store.capture(provider.spec, response, storage_encoding="gzip")
+                        existing = _entry(snapshot, len(rows), [str(field) for field in fields])
+                        state["completed"][api][key] = existing
+                        fetched += 1
+                        _atomic_write(checkpoint_path, canonical_json_bytes(state))
+                        _save_status(output, status="RUNNING", api_name=api, partition=key)
+                        if sleep_seconds:
+                            time.sleep(sleep_seconds)
+                    if int(existing["rows"]) < page_size:
+                        break
+                    offset += page_size
+    state["coverage"] = {"start": start.isoformat(), "end": end.isoformat()}
+    _atomic_write(checkpoint_path, canonical_json_bytes(state))
     totals = {
         api: {
             "partitions": len(state["completed"][api]),
@@ -324,6 +367,7 @@ def main() -> int:
     parser.add_argument("--page-size", type=int, default=5000)
     parser.add_argument("--min-free-gb", type=float, default=30.0)
     parser.add_argument("--sleep-ms", type=float, default=100.0)
+    parser.add_argument("--refresh-recent-periods", type=int, default=0)
     args = parser.parse_args()
     token = os.environ.get(args.token_env)
     if not token:
@@ -343,6 +387,7 @@ def main() -> int:
             page_size=args.page_size,
             min_free_gb=args.min_free_gb,
             sleep_seconds=args.sleep_ms / 1000,
+            refresh_recent_periods=args.refresh_recent_periods,
         )
     except Exception as error:
         _save_status(

@@ -289,7 +289,11 @@ def build(archive: Path, reference: Path, warehouse: Path) -> dict[str, Any]:
             raise ValueError(f"published row count differs for {api}")
         print(f"published {api}: {counts[api]} rows", flush=True)
     _build_catalog(warehouse / "alpha_research.duckdb", paths, counts, core_hash)
-    return {"status": "PASS", "core_checkpoint_hash": core_hash, "counts": counts}
+    summary = {"status": "PASS", "core_checkpoint_hash": core_hash, "counts": counts}
+    (warehouse / "m2e_core_build_summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    return summary
 
 
 def main() -> int:

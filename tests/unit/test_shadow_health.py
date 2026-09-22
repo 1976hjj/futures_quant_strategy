@@ -2,7 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from alpha_research_os.portfolio.shadow_health import ShadowHealthSpec
-from alpha_research_os.portfolio.strategy_backtest import StrategyBacktestRequest
+from alpha_research_os.portfolio.strategy_backtest import StrategyBacktestRequest, _universe_segment_predicate
 
 
 def test_only_baseline_and_s4_v3_are_accepted() -> None:
@@ -37,3 +37,16 @@ def test_s4_v3_allows_actual_position_sequence() -> None:
         shadow_health={"experiment_variant": "S4V3"},
     )
     assert request.shadow_health.experiment_variant == "S4V3"
+
+
+def test_universe_segments_are_required_and_map_to_board_codes() -> None:
+    with pytest.raises(ValidationError, match="at least one stock-market segment"):
+        StrategyBacktestRequest(
+            name="empty-universe", start="2020-01-01", end="2020-12-31", universe_segments=[],
+            score_rules=[{"factor_id": "test-factor", "release_id": "sha256:" + "a" * 64, "weight": 1}],
+        )
+    predicate = _universe_segment_predicate(("CHINEXT", "STAR"))
+    assert "300%.SZ" in predicate
+    assert "301%.SZ" in predicate
+    assert "688%.SH" in predicate
+    assert "600%.SH" not in predicate

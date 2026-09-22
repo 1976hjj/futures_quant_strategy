@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, timedelta
+from datetime import date
 
 import duckdb
 import pytest
@@ -9,14 +9,13 @@ from pydantic import ValidationError
 
 from alpha_research_os.portfolio.strategy_backtest import (
     StrategyBacktestRequest,
-    _adjusted_ma_states,
-    _attach_adjusted_ma_states,
     _is_pit_abnormal_security,
     _market_rows,
     _maximum_drawdown_period,
     _post_trade_exposure,
     _prefetch_market_rows,
     _sell_order_quantity,
+    _shadow_timeline,
     _target_share_quantity,
     select_portfolio,
 )
@@ -24,6 +23,28 @@ from scripts.serve_strategy_backtest_api import StrategyJobManager
 
 DIGEST_A = "sha256:" + "a" * 64
 DIGEST_B = "sha256:" + "b" * 64
+
+
+def test_shadow_timeline_aligns_s0_nav_with_next_day_managed_exposure() -> None:
+    source = [
+        {"session": "2025-01-02", "nav": 100.0},
+        {"session": "2025-01-03", "nav": 90.0},
+        {"session": "2025-01-06", "nav": 108.0},
+    ]
+    managed = [
+        {"session": "2025-01-02", "target_shadow_exposure": .5},
+        {"session": "2025-01-03", "target_shadow_exposure": .5},
+        {"session": "2025-01-06", "target_shadow_exposure": .3},
+    ]
+
+    timeline = _shadow_timeline(source, managed, 100.0)
+
+    assert [row["session"] for row in timeline] == [row["session"] for row in managed]
+    assert [row["shadow_return"] for row in timeline] == pytest.approx([0, -.1, .08])
+    assert [row["shadow_drawdown"] for row in timeline] == pytest.approx([0, -.1, 0])
+    assert [row["target_exposure"] for row in timeline] == [.5, .5, .3]
+    with pytest.raises(ValueError, match="missing"):
+        _shadow_timeline(source[:2] + [{"session": "2025-01-07", "nav": 108.0}], managed, 100.0)
 
 
 def _market_connection() -> duckdb.DuckDBPyConnection:
@@ -125,57 +146,6 @@ def test_pit_abnormal_security_uses_same_session_name(name: str) -> None:
 
 def test_current_snapshot_name_is_not_used_as_historical_status() -> None:
     assert _is_pit_abnormal_security("欣泰电气(退)", False, False) is False
-
-
-def test_adjusted_ma_state_uses_only_closes_available_by_signal_date() -> None:
-    connection = _market_connection()
-    start = date(2025, 1, 1)
-    sessions = [start + timedelta(days=index) for index in range(61)]
-    signal_date = sessions[59]
-    prices = [10.0] * 59 + [9.0, 1000.0]
-    connection.executemany(
-        "INSERT INTO research.market_daily VALUES (?, '000001.SZ', 10, ?, 1000000, true)",
-        [[session, price] for session, price in zip(sessions, prices, strict=True)],
-    )
-    connection.executemany(
-        "INSERT INTO research.adj_factor VALUES (?, '000001.SZ', 1.0)",
-        [[session] for session in sessions],
-    )
-
-    state = _adjusted_ma_states(connection, signal_date, {"000001.SZ"}, 60)["000001.SZ"]
-
-    assert state["observations"] == 60
-    assert state["adjusted_close"] == 9.0
-    assert state["moving_average"] == pytest.approx((59 * 10 + 9) / 60)
-    assert state["eligible"] is False
-
-
-def test_prefetched_ma_state_is_point_in_time_for_each_session() -> None:
-    connection = _market_connection()
-    start = date(2025, 1, 1)
-    sessions = [start + timedelta(days=index) for index in range(4)]
-    prices = [10.0, 10.0, 9.0, 11.0]
-    connection.executemany(
-        "INSERT INTO research.market_daily VALUES (?, '000001.SZ', 10, ?, 1000000, true)",
-        [[session, price] for session, price in zip(sessions, prices, strict=True)],
-    )
-    connection.executemany(
-        "INSERT INTO research.adj_factor VALUES (?, '000001.SZ', 1.0)",
-        [[session] for session in sessions],
-    )
-    cache = {
-        "000001.SZ": {
-            sessions[2]: {},
-            sessions[3]: {},
-        }
-    }
-
-    _attach_adjusted_ma_states(
-        connection, sessions[-1], {"000001.SZ"}, 3, cache
-    )
-
-    assert cache["000001.SZ"][sessions[2]]["trend_ma_eligible"] is False
-    assert cache["000001.SZ"][sessions[3]]["trend_ma_eligible"] is True
 
 
 def test_selection_excludes_pit_abnormal_name_without_future_delist_data() -> None:

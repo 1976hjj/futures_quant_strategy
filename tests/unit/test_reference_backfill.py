@@ -130,6 +130,54 @@ def test_reference_backfill_is_checkpointed_and_keeps_token_transient(tmp_path) 
     assert second["skipped_this_run"] == 12
 
 
+def test_reference_archive_extends_without_replaying_old_calendar_or_master(tmp_path) -> None:
+    class ExtensionTransport(_ReferenceTransport):
+        def post(self, url: str, payload: bytes, *, timeout: float) -> bytes:
+            request = json.loads(payload)
+            if request["api_name"] == "trade_cal":
+                self.calls.append(request)
+                fields = request["fields"].split(",")
+                rows = [
+                    {"exchange": "SSE", "cal_date": day, "is_open": "1", "pretrade_date": "19991231"}
+                    for day in ("19991231", "20000103", "20000104")
+                    if request["params"]["start_date"] <= day <= request["params"]["end_date"]
+                ]
+                return json.dumps({"code": 0, "data": {"fields": fields,
+                                   "items": [[row.get(field) for field in fields] for row in rows]}}).encode()
+            if request["api_name"] == "stock_st" and request["params"].get("trade_date") == "20000104":
+                self.calls.append(request)
+                fields = request["fields"].split(",")
+                row = {"ts_code": "000001.SZ", "name": "ST深发展", "trade_date": "20000104",
+                       "type": "ST", "type_name": "其他风险警示"}
+                return json.dumps({"code": 0, "data": {"fields": fields,
+                                   "items": [[row.get(field) for field in fields]]}}).encode()
+            return super().post(url, payload, timeout=timeout)
+
+    transport = ExtensionTransport()
+    provider = TushareProvider(token="test-secret", api_base_url="https://gateway.example.invalid/",
+                               transport=transport, clock=lambda: RETRIEVED_AT)
+    archive = tmp_path / "reference"
+    common = dict(provider=provider, start=datetime(1999, 12, 31).date(), output=archive,
+                  apis=("stock_basic", "namechange", "stock_st", "suspend_d"),
+                  max_sessions=None, min_free_gb=0, sleep_seconds=0)
+    backfill(**common, end=datetime(2000, 1, 3).date())
+    backfill(**common, end=datetime(2000, 1, 4).date())
+    checkpoint = json.loads((archive / "checkpoint.json").read_bytes())
+    assert checkpoint["coverage"]["end"] == "2000-01-04"
+    assert checkpoint["open_sessions"] == ["19991231", "20000103", "20000104"]
+    assert len(checkpoint["completed"]["trade_cal"]) == 2
+    assert "range:2000:20000104:20000104" in checkpoint["completed"]["namechange"]
+    database = tmp_path / "warehouse" / "alpha_research.duckdb"
+    database.parent.mkdir()
+    connection = duckdb.connect(str(database))
+    connection.execute("CREATE SCHEMA research")
+    connection.execute("CREATE TABLE research.market_daily (trade_date DATE, ts_code VARCHAR, is_tradeable_bar BOOLEAN)")
+    connection.close()
+    summary = build(archive, tmp_path / "warehouse")
+    assert summary["row_counts"]["trading_calendar"] == 3
+    assert summary["row_counts"]["security_master"] == 1
+
+
 def test_reference_warehouse_replays_status_without_survivorship(tmp_path) -> None:
     transport = _ReferenceTransport()
     provider = TushareProvider(

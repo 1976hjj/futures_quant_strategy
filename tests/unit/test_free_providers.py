@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 from datetime import datetime
 
@@ -16,6 +17,7 @@ from alpha_research_os.data.providers import (
     normalize_baostock_market,
     normalize_baostock_status,
 )
+from alpha_research_os.data.providers import tushare as tushare_module
 from alpha_research_os.data.raw import RawSnapshotStore
 from alpha_research_os.kernel.artifacts import ArtifactStore
 from alpha_research_os.kernel.specs import DataDomain
@@ -129,6 +131,31 @@ class FakeTushareTransport:
         self.request_document = json.loads(payload)
         fields = self.request_document["fields"].split(",")
         return json.dumps({"code": 0, "msg": None, "data": {"fields": fields, "items": []}}).encode()
+
+
+def test_tushare_http_transport_requests_and_decodes_gzip(monkeypatch) -> None:
+    captured = {}
+
+    class Response:
+        headers = {"Content-Encoding": "gzip"}
+
+        def read(self):
+            return gzip.compress(b'{"code":0}')
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+    def fake_urlopen(request, *, timeout):
+        captured["encoding"] = request.get_header("Accept-encoding")
+        return Response()
+
+    monkeypatch.setattr(tushare_module, "urlopen", fake_urlopen)
+    payload = tushare_module.UrllibHTTPTransport().post("https://gateway.example/", b"{}", timeout=1)
+    assert captured["encoding"] == "gzip"
+    assert payload == b'{"code":0}'
 
 
 def _request(domain: DataDomain, fields: tuple[str, ...]) -> FetchRequest:
