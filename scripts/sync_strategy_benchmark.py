@@ -16,8 +16,20 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_START = date(2020, 1, 1)
+DEFAULT_START = date(2010, 1, 1)
 DEFAULT_END = date(2026, 8, 31)
+
+
+def _configured_tushare_token(project_root: Path) -> str:
+    """Use the same local credential source as the data-update service."""
+    token = os.environ.get("TUSHARE_TOKEN", "").strip()
+    if token:
+        return token
+    credential = project_root / "secrets" / "tushare.env"
+    if not credential.exists():
+        return ""
+    prefix, separator, value = credential.read_text(encoding="utf-8").strip().partition("=")
+    return value.strip() if separator and prefix == "TUSHARE_TOKEN" else ""
 
 
 def _fetch_chunk(url: str) -> dict[str, object]:
@@ -171,18 +183,32 @@ def main() -> int:
         parser.error("--end must not precede --start")
     target = args.project_root / "data" / "benchmarks" / "csi300_daily.json"
     existing = json.loads(target.read_text(encoding="utf-8")) if args.incremental and target.exists() else None
-    existing_end = ((existing or {}).get("coverage") or {}).get("end")
-    fetch_start = max(args.start, date.fromisoformat(existing_end) + timedelta(days=1)) if existing_end else args.start
-    if existing and fetch_start > args.end:
-        payload = existing
-    else:
-        token = os.environ.get("TUSHARE_TOKEN", "").strip()
-        fresh = (
-            _fetch_tushare(fetch_start, args.end, endpoint=args.tushare_endpoint, token=token)
+    coverage = (existing or {}).get("coverage") or {}
+    existing_start = coverage.get("start")
+    existing_end = coverage.get("end")
+    token = _configured_tushare_token(args.project_root)
+
+    def fetch_range(start: date, end: date) -> dict[str, object]:
+        return (
+            _fetch_tushare(start, end, endpoint=args.tushare_endpoint, token=token)
             if token and args.tushare_endpoint
-            else _fetch(fetch_start, args.end, minimum_rows=1 if existing else 2)
+            else _fetch(start, end, minimum_rows=1)
         )
-        payload = _merge_incremental(existing, fresh) if existing else fresh
+
+    payload = existing
+    if existing_start:
+        historical_end = date.fromisoformat(existing_start) - timedelta(days=1)
+        # Do not request a short pre-listing/weekend gap: index_daily correctly
+        # returns no rows for it, while coverage already begins at the first session.
+        if args.start <= historical_end - timedelta(days=7):
+            historical = fetch_range(args.start, historical_end)
+            payload = _merge_incremental(payload or {}, historical)
+    fetch_start = max(args.start, date.fromisoformat(existing_end) + timedelta(days=1)) if existing_end else args.start
+    if fetch_start <= args.end:
+        fresh = fetch_range(fetch_start, args.end)
+        payload = _merge_incremental(payload or {}, fresh) if payload else fresh
+    if payload is None:
+        raise RuntimeError("CSI 300 benchmark has no available coverage")
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")

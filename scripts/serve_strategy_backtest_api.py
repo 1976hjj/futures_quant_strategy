@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import mimetypes
 import os
@@ -36,6 +37,7 @@ from alpha_research_os.portfolio.strategy_backtest import (  # noqa: E402
     ALL_UNIVERSE_SEGMENTS,
     UNIVERSE_SEGMENT_NAMES,
     StrategyBacktestRequest,
+    _csi300_benchmark,
     preflight,
     preview,
 )
@@ -241,6 +243,10 @@ class StrategyJobManager:
             if isinstance(stored_result, dict)
             else stored_result
         )
+        if isinstance(result, dict) and not isinstance(result.get("benchmark"), dict):
+            benchmark = self._benchmark_for_result(result)
+            if benchmark is not None:
+                result["benchmark"] = benchmark
         exit_code = self.process.poll() if self.active_job_id == job_id and self.process is not None else None
         if stored_result:
             status = "PASS"
@@ -373,6 +379,37 @@ class StrategyJobManager:
             result_path.name.removesuffix(".result.json") + ".summary.json"
         )
 
+    @staticmethod
+    def _experiment_kind(request: dict[str, Any]) -> str:
+        """Classify persisted jobs without changing their immutable requests."""
+        if request.get("strategy_type") == "ROTATION":
+            return "ROTATION"
+        score_rules = request.get("score_rules")
+        if isinstance(score_rules, list) and len(score_rules) == 1:
+            return "SINGLE_FACTOR"
+        return "MULTI_FACTOR"
+
+    @staticmethod
+    def _comparison_key(request: dict[str, Any]) -> str | None:
+        if StrategyJobManager._experiment_kind(request) != "SINGLE_FACTOR":
+            return None
+        ignored = {"name", "score_rules"}
+        comparable = {key: value for key, value in request.items() if key not in ignored}
+        return "sha256:" + hashlib.sha256(canonical_json_bytes(comparable)).hexdigest()
+
+    def _benchmark_for_result(self, result: dict[str, Any]) -> dict[str, Any] | None:
+        """Supply a newly available benchmark to an immutable legacy result."""
+        if isinstance(result.get("benchmark"), dict):
+            return result["benchmark"]
+        daily = result.get("daily")
+        if not isinstance(daily, list):
+            return None
+        try:
+            sessions = [date.fromisoformat(str(item["session"])) for item in daily]
+        except (KeyError, TypeError, ValueError):
+            return None
+        return _csi300_benchmark(self.project_root, sessions)
+
     def _result_listing_summary(self, result_path: Path) -> dict[str, Any]:
         """Read a tiny immutable sidecar, creating it once for legacy results."""
         summary_path = self._summary_path(result_path)
@@ -382,6 +419,7 @@ class StrategyJobManager:
                 summary = json.loads(summary_path.read_bytes())
                 if (
                     isinstance(summary, dict)
+                    and summary.get("schema_version") == "3"
                     and summary.get("result_size") == result_stat.st_size
                     and summary.get("result_mtime_ns") == result_stat.st_mtime_ns
                 ):
@@ -392,10 +430,11 @@ class StrategyJobManager:
         if not isinstance(result, dict):
             raise ValueError("backtest result must be an object")
         summary = {
-            "schema_version": "1",
+            "schema_version": "3",
             "result_size": result_stat.st_size,
             "result_mtime_ns": result_stat.st_mtime_ns,
             "result_summary": result.get("summary"),
+            "benchmark_summary": (self._benchmark_for_result(result) or {}).get("summary"),
             "trade_detail_available": "trades" in result,
             "execution_model_valid": result.get("execution_model", {}).get("version") == "2.0.0",
         }
@@ -455,9 +494,17 @@ class StrategyJobManager:
             )
         }
         listing_request = {"start": request.get("start"), "end": request.get("end")}
-        for field in ("universe_id", "universe_segments", "rebalance_sessions"):
+        for field in (
+            "universe_id", "universe_segments", "rebalance_sessions", "target_count",
+            "retention_rank", "score_rules", "filter_rules", "minimum_cash_fraction",
+        ):
             if request.get(field) is not None:
                 listing_request[field] = request[field]
+        shadow_health = request.get("shadow_health")
+        if isinstance(shadow_health, dict):
+            listing_request["shadow_health"] = {
+                "experiment_variant": shadow_health.get("experiment_variant", "S0")
+            }
         candidates = request.get("candidates")
         if isinstance(candidates, list):
             listing_request["candidates"] = [
@@ -465,6 +512,19 @@ class StrategyJobManager:
                 for candidate in candidates
                 if isinstance(candidate, dict)
             ]
+        experiment_kind = self._experiment_kind(request)
+        benchmark_summary = listing.get("benchmark_summary") or {}
+        comparison_summary = dict(result_summary or {})
+        benchmark_return = benchmark_summary.get("total_return")
+        if result_summary and benchmark_return is not None:
+            comparison_summary["benchmark_total_return"] = benchmark_return
+            comparison_summary["excess_return"] = result_summary.get("total_return", 0) - benchmark_return
+        maximum_drawdown = comparison_summary.get("maximum_drawdown")
+        annualized_return = comparison_summary.get("annualized_return")
+        if maximum_drawdown not in (None, 0) and annualized_return is not None:
+            comparison_summary["calmar"] = annualized_return / abs(maximum_drawdown)
+        score_rules = request.get("score_rules") or []
+        single_factor = score_rules[0] if experiment_kind == "SINGLE_FACTOR" else None
         return {
             "job_id": job_id,
             "status": status,
@@ -472,6 +532,9 @@ class StrategyJobManager:
             "progress": progress,
             "name": request.get("name", ""),
             "strategy_type": request.get("strategy_type", "FACTOR"),
+            "experiment_kind": experiment_kind,
+            "single_factor": single_factor,
+            "comparison_key": self._comparison_key(request),
             "trade_detail_available": bool(listing.get("trade_detail_available")),
             "execution_model_valid": bool(listing.get("execution_model_valid")),
             "created_at": created_at.isoformat(),
@@ -481,11 +544,11 @@ class StrategyJobManager:
             "request": listing_request,
             "process_alive": active,
             "elapsed_seconds": max(0, int((datetime.now().astimezone() - created_at).total_seconds())),
-            "result_summary": result_summary,
+            "result_summary": comparison_summary or None,
             **progress_payload,
         }
 
-    def list(self) -> list[dict[str, Any]]:
+    def list(self, kind: str | None = None) -> list[dict[str, Any]]:
         """Return every persisted backtest, newest first.
 
         Request/result/log files are the source of truth so history survives browser
@@ -494,7 +557,12 @@ class StrategyJobManager:
         jobs: list[dict[str, Any]] = []
         for request_path in self.run_root.glob("*.request.json"):
             try:
-                jobs.append(self._list_item(request_path))
+                item = self._list_item(request_path)
+                if kind == "single-factor" and item["experiment_kind"] != "SINGLE_FACTOR":
+                    continue
+                if kind == "history" and item["experiment_kind"] == "SINGLE_FACTOR":
+                    continue
+                jobs.append(item)
             except (OSError, ValueError, json.JSONDecodeError):
                 continue
         jobs.sort(key=lambda item: (item["created_at"], item["job_id"]), reverse=True)
@@ -549,7 +617,11 @@ def make_handler(project_root: Path, origins: set[str], manager: StrategyJobMana
                 self._json(HTTPStatus.OK, rotation_options(project_root))
                 return
             if path == "/api/v1/strategy/jobs":
-                self._json(HTTPStatus.OK, {"jobs": manager.list()})
+                kind = (parse_qs(parsed.query).get("kind") or [None])[0]
+                if kind not in (None, "single-factor", "history"):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "INVALID_KIND"})
+                    return
+                self._json(HTTPStatus.OK, {"jobs": manager.list(kind)})
                 return
             parts = path.strip("/").split("/")
             if len(parts) == 5 and parts[:4] == ["api", "v1", "strategy", "jobs"]:
