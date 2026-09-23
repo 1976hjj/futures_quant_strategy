@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import duckdb
+import pyarrow.parquet as pq
 
 from alpha_research_os.evaluation import (
     BasicEvidenceRequest,
@@ -57,7 +58,9 @@ def _sql_string(value: str) -> str:
 def _configure_bounded_connection(connection: duckdb.DuckDBPyConnection, temporary_directory: Path) -> None:
     temporary_directory.mkdir(parents=True, exist_ok=True)
     connection.execute("SET TimeZone='Asia/Shanghai'")
-    connection.execute("SET memory_limit='10GB'")
+    connection.execute("SET memory_limit='6GB'")
+    connection.execute("SET threads=2")
+    connection.execute("SET preserve_insertion_order=false")
     connection.execute(f"SET temp_directory='{_sql_path(temporary_directory)}'")
 
 
@@ -224,20 +227,40 @@ def _publish_labels(
         return manifest, parquet, True
     release_dir.mkdir(parents=True, exist_ok=True)
     temporary = release_dir / f".labels.{uuid.uuid4().hex}.tmp.parquet"
-    with duckdb.connect(str(database), read_only=True) as connection:
-        _configure_bounded_connection(connection, evidence_store / "duckdb_tmp")
-        connection.execute(
-            _label_sql(
-                factor_parquet,
-                temporary,
-                request.computation_key,
-                label_spec.label_id,
-                label_spec.label_version,
-                request.start,
-                request.end,
-                label_spec.exit.session_offset,
-            )
-        )
+    # A full-history seven-way join can exceed DuckDB's memory budget. Each year
+    # has independent signal rows; the future sessions remain available in the
+    # warehouse, so calculate bounded windows and stream them into one release.
+    writer = None
+    try:
+        with duckdb.connect(str(database), read_only=True) as connection:
+            _configure_bounded_connection(connection, evidence_store / "duckdb_tmp")
+            for year in range(request.start.year, request.end.year + 1):
+                chunk_start = max(request.start, date(year, 1, 1))
+                chunk_end = min(request.end, date(year, 12, 31))
+                chunk = release_dir / f".labels.{uuid.uuid4().hex}.part.parquet"
+                try:
+                    connection.execute(_label_sql(
+                        factor_parquet, chunk, request.computation_key,
+                        label_spec.label_id, label_spec.label_version,
+                        chunk_start, chunk_end, label_spec.exit.session_offset,
+                    ))
+                    for batch in pq.ParquetFile(chunk).iter_batches(batch_size=65536):
+                        if writer is None:
+                            writer = pq.ParquetWriter(temporary, batch.schema, compression="zstd", compression_level=6)
+                        writer.write_batch(batch)
+                finally:
+                    chunk.unlink(missing_ok=True)
+        if writer is None:
+            raise ValueError("label window produced no factor rows")
+    except Exception:
+        if writer is not None:
+            writer.close()
+            writer = None
+        temporary.unlink(missing_ok=True)
+        raise
+    finally:
+        if writer is not None:
+            writer.close()
     with duckdb.connect() as connection:
         source = f"read_parquet('{_sql_path(temporary)}')"
         row_count, valid_count, invalid_count, duplicates, nonfinite = connection.execute(

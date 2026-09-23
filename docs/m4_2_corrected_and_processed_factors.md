@@ -45,7 +45,7 @@ Q1 窗口发现 18 个复权因子跳变事件。新旧定义分别改变 509 �
 - 三个 Evidence Bundle 均使用同一 corrected RAW 标签发布，避免标签样本差异污染比较；
 - 所有资产哈希、父级血缘、数据库登记、重复键和非有限值门禁通过。
 
-审计入口为 `scripts/audit_m4_2_factor_variants.py`，审计记录见 `docs/audits/m4_2_factor_variants_verification.md`。
+原 13 因子批次及其专用审计入口已在重复因子清理后退出活动系统；历史审计记录仅用于追溯。
 
 ## 5. 证据边界
 

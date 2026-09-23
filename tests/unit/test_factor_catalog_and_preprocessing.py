@@ -17,32 +17,32 @@ from alpha_research_os.factors import (
 from alpha_research_os.kernel.errors import IntegrityViolation
 
 
-def test_initial_catalog_keeps_external_reproduction_research_only() -> None:
+def test_initial_catalog_contains_only_custom_factors() -> None:
     catalog = build_initial_catalog()
     entries = catalog.list()
-    assert len(entries) == 13
-    external = catalog.get("wq-alpha101-reproduction", "1.0.0")
-    assert external.entry.lifecycle is FactorLifecycle.RESEARCH_ONLY
-    assert external.entry.source_reference.formula_verified_against_primary_source
+    assert {item.entry.spec.factor_id for item in entries} == {
+        "amihud-illiquidity-20",
+        "debt-to-assets-pit",
+        "overnight-gap-1",
+        "roe-pit",
+    }
 
 
-def test_m4_2_catalog_versions_only_corporate_action_sensitive_price_factors() -> None:
+def test_m4_2_catalog_versions_only_overnight_gap() -> None:
     catalog = build_m4_2_catalog()
-    assert len(catalog.list()) == 13
+    assert len(catalog.list()) == 4
     versions = {item.entry.spec.factor_id: item.entry.spec.factor_version for item in catalog.list()}
-    assert versions["price-momentum-20"] == "2.0.0"
-    assert versions["short-reversal-5"] == "2.0.0"
     assert versions["overnight-gap-1"] == "2.0.0"
-    assert versions["intraday-strength"] == "1.0.0"
+    assert versions["amihud-illiquidity-20"] == "1.0.0"
 
 
-def test_adjusted_price_factor_is_invariant_to_a_mechanical_split() -> None:
-    old = build_initial_catalog().registry.get("short-reversal-5", "1.0.0").compiled_expression
-    corrected = build_m4_2_catalog().registry.get("short-reversal-5", "2.0.0").compiled_expression
+def test_adjusted_overnight_gap_is_invariant_to_a_mechanical_split() -> None:
+    old = build_initial_catalog().registry.get("overnight-gap-1", "1.0.0").compiled_expression
+    corrected = build_m4_2_catalog().registry.get("overnight-gap-1", "2.0.0").compiled_expression
     assert old is not None and corrected is not None
-    raw_history = {"close": (10.0, 10.0, 10.0, 10.0, 10.0, 5.0)}
-    adjusted_history = {"adjusted_close": (10.0, 10.0, 10.0, 10.0, 10.0, 10.0)}
-    assert old.evaluate(raw_history) == pytest.approx(0.5)
+    raw_history = {"close": (10.0, 5.0), "open": (10.0, 5.0)}
+    adjusted_history = {"adjusted_close": (10.0, 10.0), "adjusted_open": (10.0, 10.0)}
+    assert old.evaluate(raw_history) == pytest.approx(-0.5)
     assert corrected.evaluate(adjusted_history) == pytest.approx(0.0)
 
 

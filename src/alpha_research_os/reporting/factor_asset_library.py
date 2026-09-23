@@ -245,6 +245,7 @@ def query_factor_assets(
     page_size: int = 12,
     query: str = "",
     horizon: int | None = None,
+    source: Literal["ALL", "CURRENT", "ALPHA158", "JQDATA"] = "ALL",
     status: Literal["ALL", "TESTED", "RAW_ONLY", "WITH_EXECUTION"] = "ALL",
     sort_order: Literal["asc", "desc"] = "desc",
 ) -> dict[str, Any]:
@@ -252,6 +253,8 @@ def query_factor_assets(
         raise ValueError("page must be positive and pageSize must be between 1 and 100")
     if horizon is not None and horizon not in {5, 10, 20, 30}:
         raise ValueError("horizon must be 5, 10, 20, or 30")
+    if source not in {"ALL", "CURRENT", "ALPHA158", "JQDATA"}:
+        raise ValueError("unknown factor source")
     if status not in {"ALL", "TESTED", "RAW_ONLY", "WITH_EXECUTION"}:
         raise ValueError("unknown asset status")
     term = query.strip().casefold()
@@ -259,6 +262,7 @@ def query_factor_assets(
         item
         for item in items
         if (not term or term in " ".join(str(item.get(key) or "") for key in ("factor_id", "external_name", "chinese_name")).casefold())
+        and (source == "ALL" or item["source_collection"] == source)
         and (horizon is None or item["holding_sessions"] == horizon)
         and (
             status == "ALL"
@@ -335,5 +339,8 @@ def query_factor_assets(
             "raw_only": sum(all(run["test_window"] is None for run in runs) for runs in all_groups.values()),
             "with_execution": sum(any(run["has_execution"] for run in runs) for runs in all_groups.values()),
             "runs": len(items),
+            "current": sum(item[0]["source_collection"] == "CURRENT" for item in all_groups.values()),
+            "alpha158": sum(item[0]["source_collection"] == "ALPHA158" for item in all_groups.values()),
+            "jqdata": sum(item[0]["source_collection"] == "JQDATA" for item in all_groups.values()),
         },
     }

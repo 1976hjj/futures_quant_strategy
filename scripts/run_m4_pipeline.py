@@ -168,6 +168,10 @@ def execute(config: M4PipelineConfig, *, validate_only: bool = False) -> dict[st
             if stage not in selected:
                 continue
             stage_started = datetime.now().astimezone()
+            report["current_stage"] = stage
+            report["current_stage_started_at"] = stage_started.isoformat()
+            _atomic_report(report_path, report)
+            print(f"m4_stage={stage} started", flush=True)
             if stage == "processed":
                 outputs = []
                 processed_ids = []
@@ -340,7 +344,10 @@ def execute(config: M4PipelineConfig, *, validate_only: bool = False) -> dict[st
                 "completed_at": datetime.now().astimezone().isoformat(),
                 "result": stage_result,
             }
+            report["current_stage"] = None
+            report["current_stage_started_at"] = None
             _atomic_report(report_path, report)
+            print(f"m4_stage={stage} completed", flush=True)
         report["status"] = "PASS"
     except Exception as error:
         report["status"] = "FAIL"

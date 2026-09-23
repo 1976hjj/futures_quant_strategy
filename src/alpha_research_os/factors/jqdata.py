@@ -1,8 +1,8 @@
 """Curated JoinQuant/JQData factors used by the first strategy research pass.
 
-The formulas below are copied from JoinQuant's factor-board metadata.  Publicly
-reproducible formulas are evaluated on governed local data; analyst forecasts and
-the composite residual-volatility factor still use JQData's published values.
+The formulas below are copied from JoinQuant's factor-board metadata. Publicly
+reproducible formulas are evaluated on governed local data. Factors that need
+unavailable analyst-consensus inputs are intentionally omitted.
 """
 
 from __future__ import annotations
@@ -38,17 +38,6 @@ def jqdata_catalog() -> tuple[JQDataCatalogItem, ...]:
 
     base = (
         JQDataCatalogItem(
-            factor_id="jqdata-predicted-earnings-to-price-ratio",
-            external_name="predicted_earnings_to_price_ratio",
-            chinese_name="预期盈利收益率（聚宽原名：预期市盈率）",
-            category="估值",
-            family="jqdata-valuation",
-            formula="分析师对未来一年预期盈利加权平均值 / 当前股票市值",
-            description="衡量分析师一致预期盈利相对当前市值的水平。它是收益率口径，不是通常所说的市盈率倍数。",
-            required_fields=("JQData.predicted_earnings_to_price_ratio",),
-            expected_direction="HIGH",
-        ),
-        JQDataCatalogItem(
             factor_id="jqdata-cash-earnings-to-price-ratio",
             external_name="cash_earnings_to_price_ratio",
             factor_version="jqdata-factorlib-2",
@@ -75,7 +64,7 @@ def jqdata_catalog() -> tuple[JQDataCatalogItem, ...]:
         JQDataCatalogItem(
             factor_id="jqdata-share-turnover-monthly",
             external_name="share_turnover_monthly",
-            factor_version="jqdata-factorlib-2",
+            factor_version="jqdata-factorlib-3",
             chinese_name="月换手率",
             category="流动性",
             family="jqdata-liquidity",
@@ -87,7 +76,7 @@ def jqdata_catalog() -> tuple[JQDataCatalogItem, ...]:
         JQDataCatalogItem(
             factor_id="jqdata-daily-standard-deviation",
             external_name="daily_standard_deviation",
-            factor_version="jqdata-factorlib-2",
+            factor_version="jqdata-factorlib-3",
             chinese_name="日收益率标准差（252日指数加权）",
             category="波动",
             family="jqdata-risk",
@@ -102,12 +91,13 @@ def jqdata_catalog() -> tuple[JQDataCatalogItem, ...]:
         JQDataCatalogItem(
             factor_id="jqdata-resvol",
             external_name="resvol",
+            factor_version="jqdata-factorlib-local-2",
             chinese_name="残余波动率因子",
             category="波动",
             family="jqdata-risk",
             formula="0.50 * daily_std + 0.42 * historical_resid_sigma + 0.08 * cum_range",
             description="综合日收益波动、市场模型残差波动和累计收益区间。第一版策略用它排除残余波动最高的一组股票。",
-            required_fields=("JQData.resvol",),
+            required_fields=("adjusted_close", "close", "pre_close"),
             expected_direction="LOW",
         ),
     )
@@ -223,7 +213,8 @@ def jqdata_catalog() -> tuple[JQDataCatalogItem, ...]:
         JQDataCatalogItem(
             factor_id="jqdata-momentum",
             external_name="momentum",
-            factor_version="jqdata-factorlib-local-1",
+            # Version 3 corrects the full 252-session lag warmup.
+            factor_version="jqdata-factorlib-local-3",
             chinese_name="中期动量（本地复现）",
             category="动量",
             family="jqdata-style",
@@ -330,9 +321,15 @@ def jqdata_catalog() -> tuple[JQDataCatalogItem, ...]:
         ),
     )
     # Local reproductions are versioned immutably. Version 2 adds strict full-window
-    # guards for rolling market factors and supersedes the initial candidate release.
+    # guards; momentum version 3 also corrects the full 252-session lag warmup.
     expanded = tuple(
-        item.model_copy(update={"factor_version": "jqdata-factorlib-local-2"})
+        item.model_copy(update={
+            "factor_version": (
+                "jqdata-factorlib-local-3"
+                if item.external_name == "momentum"
+                else "jqdata-factorlib-local-2"
+            )
+        })
         for item in expanded_v1
     )
     return base + expanded

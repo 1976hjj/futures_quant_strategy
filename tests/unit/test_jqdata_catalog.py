@@ -10,15 +10,14 @@ from scripts.publish_jqdata_factor import FUNDAMENTAL_ENGINE_VERSION, _catalog, 
 def test_jqdata_catalog_contains_selected_originals_and_local_replacements() -> None:
     items = jqdata_catalog()
     names = [item.external_name for item in items]
-    assert names[:6] == [
-        "predicted_earnings_to_price_ratio",
+    assert names[:5] == [
         "cash_earnings_to_price_ratio",
         "earnings_to_price_ratio",
         "share_turnover_monthly",
         "daily_standard_deviation",
         "resvol",
     ]
-    assert set(names[6:]) == {
+    assert set(names[5:]) == {
         "book_to_price_ratio", "cash_flow_to_price_ratio", "roe_ttm", "roa_ttm", "ACCA",
         "adjusted_profit_to_total_profit", "net_operating_cash_flow_coverage",
         "debt_to_equity_ratio", "growth", "momentum", "Rank1M", "Variance20",
@@ -28,11 +27,12 @@ def test_jqdata_catalog_contains_selected_originals_and_local_replacements() -> 
     by_name = {item.external_name: item for item in items}
     assert by_name["cash_earnings_to_price_ratio"].factor_version == "jqdata-factorlib-2"
     assert by_name["earnings_to_price_ratio"].factor_version == "jqdata-factorlib-2"
-    assert by_name["share_turnover_monthly"].factor_version == "jqdata-factorlib-2"
-    assert by_name["daily_standard_deviation"].factor_version == "jqdata-factorlib-2"
-    assert by_name["predicted_earnings_to_price_ratio"].formula == (
-        "分析师对未来一年预期盈利加权平均值 / 当前股票市值"
-    )
+    assert by_name["share_turnover_monthly"].factor_version == "jqdata-factorlib-3"
+    assert by_name["daily_standard_deviation"].factor_version == "jqdata-factorlib-3"
+    assert by_name["momentum"].factor_version == "jqdata-factorlib-local-3"
+    assert _catalog(by_name["momentum"]).list()[0].entry.spec.warmup_sessions == 252
+    assert by_name["resvol"].factor_version == "jqdata-factorlib-local-2"
+    assert _catalog(by_name["resvol"]).list()[0].entry.spec.warmup_sessions == 251
     assert by_name["cash_earnings_to_price_ratio"].formula == "过去一年的净经营现金流 / 当前股票市值"
     assert by_name["earnings_to_price_ratio"].formula == (
         "过去一年的归母净利润 / 当前股票市值（等于 PE_TTM 的倒数）"
@@ -42,17 +42,15 @@ def test_jqdata_catalog_contains_selected_originals_and_local_replacements() -> 
     assert by_name["resvol"].formula == (
         "0.50 * daily_std + 0.42 * historical_resid_sigma + 0.08 * cum_range"
     )
-    assert [item.expected_direction for item in items[:6]] == [
-        "HIGH", "HIGH", "HIGH", "LOW", "LOW", "LOW"
-    ]
+    assert [item.expected_direction for item in items[:5]] == ["HIGH", "HIGH", "LOW", "LOW", "LOW"]
 
 
 def test_jqdata_catalog_is_a_separate_source_filter(tmp_path) -> None:
     response = query_factor_catalog(
         build_factor_catalog_overview(tmp_path), page=1, page_size=30, source="JQDATA"
     )
-    assert response["totalItems"] == 24
-    assert response["counts"]["jqdata"] == 24
+    assert response["totalItems"] == 23
+    assert response["counts"]["jqdata"] == 23
     assert all(item["source_collection"] == "JQDATA" for item in response["items"])
 
 

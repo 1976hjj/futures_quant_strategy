@@ -17,11 +17,8 @@
     "factor_explorer",
     "audit_factor_explorer"
   ],
-  "raw_factor_release_id": "sha256:3e3d4e69428ce879ee9b53ffc6c39bc8b17b8d49780d305ecff8c0e96ee94fe7",
-  "processed_factor_release_ids": [
-    "sha256:b18a177256ad433e20cf97d543a5e68d324c6c3c4d9859be8981a41ee8761009",
-    "sha256:0e3b87d5c2fbdae6b46569d633e2a370add03eae27c49d4bee8a31266fc6a91a"
-  ],
+  "raw_factor_release_id": "sha256:c4ff89730a32122ef8ab6c68e646ac7f049a3d43a6b3712d3e2a1d952e4d04c3",
+  "processed_factor_release_ids": [],
   "processed_variants": [],
   "walk_forward": {
     "family_id": "M4-4-2023-2025-RANKIC-ALL-FACTORS-ALL-VARIANTS-v1",
@@ -65,23 +62,7 @@
     "family_id": "M4-5-ORTHOGONAL-RANKIC-EXPOSED-2020-2025-ALL-CANONICAL-v1",
     "candidate_policy": "ALL_CANONICAL",
     "bind_configuration_to_asset_identity": false,
-    "direction_overrides": {
-      "price-momentum-20": {
-        "multiplier": -1,
-        "direction_source": "POST_M4_4_REVERSED_MOMENTUM_DIAGNOSTIC",
-        "focus_hypothesis": "REVERSED_PRICE_MOMENTUM"
-      },
-      "volume-shock-20": {
-        "multiplier": -1,
-        "direction_source": "POST_M4_4_OBSERVED_NEGATIVE_DIAGNOSTIC",
-        "focus_hypothesis": "VOLUME_SHOCK"
-      },
-      "return-volatility-20": {
-        "multiplier": -1,
-        "direction_source": "DECLARED_NEGATIVE",
-        "focus_hypothesis": "RETURN_VOLATILITY"
-      }
-    }
+    "direction_overrides": {}
   },
   "execution": {
     "window_start": "2020-01-02",
@@ -91,7 +72,7 @@
     "report_name": "M4-CURRENT-FACTOR-EXPLORER-v1",
     "title": "Alpha Research OS · Factor Evidence Explorer",
     "output_root": "reports/factor_explorer",
-    "robustness_id": "sha256:a8368caf70682a1918fb3f2c7380e510b2b62a169db1e142a603d0d601337eaa",
+    "robustness_id": null,
     "basic_evidence_ids": [],
     "maximum_compare_entities": 6
   }

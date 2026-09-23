@@ -150,6 +150,59 @@ class FactorComputeRequest(BaseModel):
         return self
 
 
+class FactorBatchRequest(BaseModel):
+    factors: tuple[dict[str, str], ...] = Field(min_length=1, max_length=195)
+    start: date
+    end: date
+    stages: tuple[str, ...] = ()
+    holding_sessions: int = 5
+    quantile_count: int = Field(default=5, ge=2, le=20)
+    minimum_pairs_per_session: int = Field(default=20, ge=3)
+    processed_variants: tuple[str, ...] = ("WINSORIZED_ZSCORE", "SIZE_NEUTRALIZED")
+    selection_quantile: float = Field(default=0.20, gt=0, lt=1)
+    capital_scenarios_cny: tuple[int, ...] = (1_000_000, 10_000_000, 100_000_000)
+    buy_commission_bps: float = Field(default=3.0, ge=0)
+    sell_commission_bps: float = Field(default=3.0, ge=0)
+    sell_stamp_duty_bps: float = Field(default=5.0, ge=0)
+    base_slippage_bps: float = Field(default=2.0, ge=0)
+    square_root_impact_bps: float = Field(default=20.0, ge=0)
+    maximum_slippage_bps: float = Field(default=100.0, ge=0)
+    maximum_participation_rate: float = Field(default=0.10, gt=0, le=1)
+
+    @model_validator(mode="after")
+    def valid_scope(self) -> FactorBatchRequest:
+        if self.end < self.start:
+            raise ValueError("end must not precede start")
+        if len({item.get("factor_id") for item in self.factors}) != len(self.factors):
+            raise ValueError("batch factors must be unique")
+        catalog = {item.factor_id: item for item in (*alpha158_catalog(), *jqdata_catalog())}
+        catalog.update({item.spec.factor_id: item.spec for item in m4_2_factor_entries()})
+        for item in self.factors:
+            known = catalog.get(item.get("factor_id"))
+            if known is None or known.factor_version != item.get("factor_version"):
+                raise ValueError(f"factor or version is not in the current catalog: {item.get('factor_id')}")
+        if len(self.stages) != len(set(self.stages)) or not set(self.stages).issubset(STAGE_LABELS):
+            raise ValueError("unsupported or duplicate M4 stages")
+        if self.holding_sessions not in {5, 10, 20, 30}:
+            raise ValueError("holding_sessions must be 5, 10, 20, or 30")
+        if "m4_5" in self.stages and len(self.factors) < 2:
+            raise ValueError("M4.5 needs at least two selected factors")
+        return self
+
+
+def _batch_stage_closure(stages: tuple[str, ...]) -> list[str]:
+    required = set(stages)
+    if "m4_5" in required:
+        required.update(("m4_1", "m4_2", "m4_3", "m4_4"))
+    if "m4_4" in required:
+        required.update(("m4_1", "m4_2", "m4_3"))
+    if "m4_3" in required:
+        required.update(("m4_1", "m4_2"))
+    if "m4_6" in required:
+        required.add("m4_1")
+    return [stage for stage in STAGE_LABELS if stage in required]
+
+
 def _factor_releases(project_root: Path) -> list[dict[str, Any]]:
     catalog_items = build_factor_catalog_overview(project_root)
     name_index = {
@@ -476,10 +529,7 @@ class FactorJobManager:
 
     def start(self, payload: dict[str, Any]) -> dict[str, Any]:
         request = FactorComputeRequest.model_validate(payload)
-        jqdata_account_factors = {
-            "jqdata-predicted-earnings-to-price-ratio",
-            "jqdata-resvol",
-        }
+        jqdata_account_factors: set[str] = set()
         if request.factor_id in jqdata_account_factors and (
             not os.environ.get("JQDATA_USERNAME", "").strip() or not os.environ.get("JQDATA_PASSWORD", "")
         ):
@@ -627,11 +677,285 @@ class FactorJobManager:
         return None if not requests else self.status(requests[0].name.removesuffix(".request.json"))
 
 
+_BATCH_STAGE_NAMES = {
+    "processed": "生成处理版本", "basic_evidence": "收益与分组证据",
+    "audit_basic_evidence": "基础证据审计", "robustness": "稳健性检验",
+    "audit_robustness": "稳健性审计", "walk_forward": "滚动时间检验",
+    "audit_walk_forward": "滚动检验审计", "redundancy": "M4.5 去重与增量价值",
+    "audit_redundancy": "M4.5 去重审计", "factor_explorer": "生成结果报告",
+    "audit_factor_explorer": "结果报告审计", "execution": "成交与容量检验",
+    "audit_execution": "成交检验审计",
+}
+
+
+def _batch_log_detail(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    tail = path.read_bytes()[-16_000:].decode("utf-8", errors="replace")
+    lines = tail.splitlines()
+    last_stage = next((index for index in range(len(lines) - 1, -1, -1)
+                       if re.match(r"m4_stage=\w+ started$", lines[index].strip())), None)
+    if last_stage is not None:
+        lines = lines[last_stage + 1:]
+    for line in reversed(lines):
+        year = re.search(r"(?:conditional|daily|variant=\S+|factor=\S+) .*?year=(\d{4})", line)
+        if year:
+            variant = re.search(r"variant=(\S+)", line)
+            subject = f" · {variant.group(1)}" if variant else ""
+            return f"正在处理 {year.group(1)} 年{subject}"
+        if "combining yearly partitions" in line:
+            return "正在合并年度结果"
+        if "quality checking" in line:
+            return "正在检查数据质量"
+        if "publishing metadata" in line:
+            return "正在登记结果"
+    return None
+
+
+def _batch_m4_steps(project_root: Path, job_id: str | None, log_path: Path) -> dict[str, Any] | None:
+    if not job_id:
+        return None
+    root = project_root / "reports" / "m4_runs"
+    config_path = root / f"{job_id}.config.json"
+    if not config_path.exists():
+        return None
+    config = json.loads(config_path.read_bytes())
+    stages = config.get("stages") or []
+    report_path = root / f"{job_id}.json"
+    report = json.loads(report_path.read_bytes()) if report_path.exists() else {}
+    completed = set(report.get("stages") or {})
+    current = report.get("current_stage")
+    if not current and report.get("status") == "RUNNING":
+        current = next((stage for stage in stages if stage not in completed), None)
+    steps = [{"id": stage, "label": _BATCH_STAGE_NAMES.get(stage, stage),
+              "status": "PASS" if stage in completed else "RUNNING" if stage == current else "WAITING"}
+             for stage in stages]
+    started = report.get("current_stage_started_at")
+    elapsed = max(0, int((datetime.now().astimezone() - datetime.fromisoformat(started)).total_seconds())) if started else None
+    return {"completed": len(completed), "total": len(stages),
+            "current": current, "current_label": _BATCH_STAGE_NAMES.get(current, current) if current else None,
+            "detail": _batch_log_detail(log_path), "elapsed_seconds": elapsed,
+            "steps": steps}
+
+
+class FactorBatchManager:
+    def __init__(self, project_root: Path) -> None:
+        self.project_root = project_root
+        self.run_root = project_root / "reports" / "factor_batches"
+        self.run_root.mkdir(parents=True, exist_ok=True)
+        self.lock = threading.Lock()
+        self.process: subprocess.Popen[bytes] | None = None
+        self.active_job_id: str | None = None
+
+    def running(self) -> bool:
+        return self.process is not None and self.process.poll() is None
+
+    def preflight(self, payload: dict[str, Any]) -> dict[str, Any]:
+        request = FactorBatchRequest.model_validate(payload)
+        database = self.project_root / "data/warehouse/alpha_research.duckdb"
+        with duckdb.connect(str(database), read_only=True) as connection:
+            lower, upper = connection.execute(
+                "SELECT min(trade_date), max(trade_date) FROM research.market_daily"
+            ).fetchone()
+        if lower is None or request.start < lower or request.end > upper:
+            raise ValueError(f"计算日期必须在原始数据覆盖范围 {lower} 至 {upper} 内")
+        catalog = {item["factor_id"]: item for item in build_factor_catalog_overview(self.project_root)}
+        items = []
+        for factor in request.factors:
+            entry = catalog[factor["factor_id"]]
+            coverage = entry.get("coverage") or {}
+            items.append({
+                "factor_id": factor["factor_id"], "name": entry["chinese_name"],
+                "coverage": coverage, "action": "已覆盖，可复用" if coverage.get("start", "9999") <= request.start.isoformat()
+                and coverage.get("end", "0000") >= request.end.isoformat() else "计算或补齐",
+            })
+        resolved = _batch_stage_closure(request.stages)
+        entities = len(items) * (1 + (len(request.processed_variants) if "m4_2" in resolved else 0))
+        pairs = entities * (entities - 1) // 2 if "m4_5" in resolved else 0
+        warnings = ["M4.5 将对本批次通过前置检验的因子共同运行。"] if pairs else []
+        if pairs > 10_000:
+            warnings.append(f"M4.5 约需比较 {pairs:,} 对因子版本，预计耗时较长；建议缩小本批选择范围。")
+        return {
+            "status": "READY", "start": request.start.isoformat(), "end": request.end.isoformat(),
+            "count": len(items), "items": items, "requested_stages": list(request.stages),
+            "resolved_stages": resolved,
+            "added_stages": [stage for stage in resolved if stage not in request.stages],
+            "estimated_pair_correlations": pairs,
+            "warnings": warnings,
+        }
+
+    def start(self, payload: dict[str, Any], reuse_items: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+        plan = self.preflight(payload)
+        request = FactorBatchRequest.model_validate(payload)
+        with self.lock:
+            if self.running():
+                raise RuntimeError(f"factor batch {self.active_job_id} is already running")
+            job_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+            request_path = self.run_root / f"{job_id}.request.json"
+            saved = request.model_dump(mode="json")
+            saved["resolved_stages"] = plan["resolved_stages"]
+            saved["reuse_items"] = reuse_items or {}
+            names = {item["factor_id"]: item["name"] for item in plan["items"]}
+            saved["factors"] = [{**item, "name": names[item["factor_id"]]} for item in saved["factors"]]
+            request_path.write_bytes(canonical_json_bytes(saved) + b"\n")
+            log_stream = (self.run_root / f"{job_id}.log").open("wb")
+            environment = os.environ.copy()
+            environment["PYTHONPATH"] = os.pathsep.join((str(SRC_ROOT), str(PROJECT_ROOT)))
+            self.process = subprocess.Popen(
+                [sys.executable, "scripts/run_factor_batch.py", "--request", str(request_path)],
+                cwd=self.project_root, env=environment, stdout=log_stream, stderr=subprocess.STDOUT,
+            )
+            self.active_job_id = job_id
+            threading.Thread(target=JobManager._wait_and_close, args=(self.process, log_stream), daemon=True).start()
+        return self.status(job_id)
+
+    def status(self, job_id: str) -> dict[str, Any]:
+        if not re.fullmatch(r"\d{8}-\d{6}-[0-9a-f]{6}", job_id):
+            raise ValueError("invalid batch id")
+        request_path = self.run_root / f"{job_id}.request.json"
+        if not request_path.exists():
+            raise FileNotFoundError(job_id)
+        request = json.loads(request_path.read_bytes())
+        state_path = self.run_root / f"{job_id}.state.json"
+        state = json.loads(state_path.read_bytes()) if state_path.exists() else {}
+        active = self.active_job_id == job_id and self.running()
+        status = state.get("status", "RUNNING")
+        if status == "RUNNING" and not active and self.active_job_id == job_id:
+            status = "FAIL"
+        if not state:
+            state = {"phase": "准备任务", "cohort_job_id": None, "cohort_status": "NOT_RUN", "error": None, "items": [
+                {"factor_id": item["factor_id"], "name": item["name"], "status": "WAITING", "phase": "等待计算"}
+                for item in request["factors"]]}
+        completed = sum(item["status"] in {"PASS", "FAIL"} for item in state["items"])
+        current = next((item for item in state["items"] if item["status"] == "RUNNING"), None)
+        individual_stages = {stage for name in request["resolved_stages"] if name != "m4_5"
+                             for stage in PIPELINE_STAGE_BY_UI[name]}
+        factor_total = 1 + len(individual_stages)
+        has_cohort = "m4_5" in request["resolved_stages"]
+        cohort_pipeline = _batch_m4_steps(
+            self.project_root, state.get("cohort_job_id"), self.run_root / f"{job_id}.cohort.log"
+        ) if has_cohort else None
+        cohort_total = (1 + (cohort_pipeline["total"] if cohort_pipeline else 7)) if has_cohort else 0
+        total_steps = len(state["items"]) * factor_total + cohort_total
+        completed_steps = 0
+        progress_units = 0.0
+        activity: dict[str, Any] | None = None
+        total_years = date.fromisoformat(request["end"]).year - date.fromisoformat(request["start"]).year + 1
+        for index, item in enumerate(state["items"]):
+            pipeline = _batch_m4_steps(
+                self.project_root, item.get("m4_job_id"), self.run_root / f"{job_id}.{index}.m4.log"
+            )
+            item["stage_progress"] = pipeline
+            if item["status"] in {"PASS", "FAIL"}:
+                units = float(factor_total)
+                whole = factor_total
+            elif item.get("release_id"):
+                whole = 1 + (pipeline["completed"] if pipeline else 0)
+                units = float(whole)
+            elif item["status"] == "RUNNING":
+                factor_log = self.run_root / f"{job_id}.{index}.factor.log"
+                tail = factor_log.read_bytes()[-32_000:].decode("utf-8", errors="replace") if factor_log.exists() else ""
+                finished_years = len(set(re.findall(r"year=(\d{4}) completed", tail)))
+                whole = 0
+                units = min(0.95, finished_years / total_years)
+                item["factor_years"] = {"completed": finished_years, "total": total_years}
+            else:
+                whole = 0
+                units = 0.0
+            completed_steps += whole
+            progress_units += units
+            item["progress"] = round(100 * units / factor_total)
+            if item is current:
+                detail = pipeline["detail"] if pipeline else _batch_log_detail(
+                    self.run_root / f"{job_id}.{index}.factor.log"
+                )
+                activity = {"title": item["name"],
+                            "stage": pipeline["current_label"] if pipeline else item["phase"],
+                            "detail": detail, "stage_progress": pipeline}
+        if has_cohort:
+            if state.get("cohort_status") in {"PASS", "FAIL", "SKIPPED"}:
+                cohort_whole = cohort_total
+            elif state.get("cohort_status") == "RUNNING":
+                cohort_whole = (1 + (cohort_pipeline["completed"] if cohort_pipeline else 0)) if state.get("cohort_job_id") else 0
+                activity = {"title": "本批联合 M4.5",
+                            "stage": cohort_pipeline["current_label"] if cohort_pipeline else "合并因子数据",
+                            "detail": cohort_pipeline["detail"] if cohort_pipeline else None,
+                            "stage_progress": cohort_pipeline}
+            else:
+                cohort_whole = 0
+            completed_steps += cohort_whole
+            progress_units += cohort_whole
+        progress = round(100 * progress_units / total_steps) if total_steps else 0
+        if status == "RUNNING":
+            progress = min(99, progress)
+        elif status in {"PASS", "PARTIAL", "FAIL"}:
+            progress = 100
+        finished_at = state.get("completed_at") if status != "RUNNING" else None
+        elapsed_seconds = 0
+        if state.get("started_at"):
+            end_time = datetime.fromisoformat(finished_at) if finished_at else datetime.now().astimezone()
+            elapsed_seconds = max(0, int((end_time - datetime.fromisoformat(state["started_at"])).total_seconds()))
+        return {**state, "status": status, "batch_id": job_id, "request": request,
+                "completed": completed, "total": len(state["items"]), "progress": progress,
+                "completed_steps": completed_steps, "total_steps": total_steps,
+                "activity": activity, "cohort_stage_progress": cohort_pipeline,
+                "elapsed_seconds": elapsed_seconds,
+                "stop_requested": (self.run_root / f"{job_id}.stop").exists()}
+
+    def stop(self, job_id: str) -> dict[str, Any]:
+        current = self.status(job_id)
+        if current["status"] != "RUNNING":
+            raise ValueError("batch is not running")
+        (self.run_root / f"{job_id}.stop").write_text("stop after current factor\n", encoding="utf-8")
+        return self.status(job_id)
+
+    def retry_failed(self, job_id: str) -> dict[str, Any]:
+        current = self.status(job_id)
+        if current["status"] == "RUNNING":
+            raise RuntimeError("wait for the current batch before retrying")
+        failures = {item["factor_id"] for item in current["items"]
+                    if item["status"] == "FAIL" or current["status"] == "STOPPED" and item["status"] == "WAITING"}
+        if "m4_5" in current["request"]["resolved_stages"]:
+            failures = {item["factor_id"] for item in current["items"]}
+        if not failures:
+            raise ValueError("there are no failed factors to retry")
+        payload = dict(current["request"])
+        catalog = {item.factor_id: item for item in (*alpha158_catalog(), *jqdata_catalog())}
+        catalog.update({item.spec.factor_id: item.spec for item in m4_2_factor_entries()})
+        payload["factors"] = [
+            {
+                **item,
+                "factor_version": catalog[item["factor_id"]].factor_version,
+            }
+            if item["factor_id"] in catalog else dict(item)
+            for item in payload["factors"]
+            if item["factor_id"] in failures
+        ]
+        if "m4_5" in payload["stages"] and len(payload["factors"]) < 2:
+            payload["stages"] = [stage for stage in payload["stages"] if stage != "m4_5"]
+        reuse_items = {
+            item["factor_id"]: {
+                "release_id": item["release_id"], "m4_job_id": item.get("m4_job_id"),
+                "m4_retry": item["status"] == "FAIL",
+            }
+            for item in current["items"]
+            if item.get("release_id") and (
+                item["status"] == "PASS" or item["status"] == "FAIL" and item.get("m4_job_id")
+            )
+        }
+        return self.start(payload, reuse_items=reuse_items)
+
+    def latest(self) -> dict[str, Any] | None:
+        requests = sorted(self.run_root.glob("*.request.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+        return self.status(requests[0].name.removesuffix(".request.json")) if requests else None
+
+
 def make_handler(
     project_root: Path,
     allowed_origins: set[str],
     manager: JobManager,
     factor_manager: FactorJobManager,
+    batch_manager: FactorBatchManager,
 ):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
@@ -663,7 +987,22 @@ def make_handler(
             if path == "/api/v1/factors/jobs/latest":
                 self._json(HTTPStatus.OK, {"job": factor_manager.latest()})
                 return
+            if path == "/api/v1/factors/batches/latest":
+                self._json(HTTPStatus.OK, {"batch": batch_manager.latest()})
+                return
+            if path == "/api/v1/factors/batches/options":
+                database = project_root / "data/warehouse/alpha_research.duckdb"
+                with duckdb.connect(str(database), read_only=True) as connection:
+                    lower, upper = connection.execute(
+                        "SELECT min(trade_date), max(trade_date) FROM research.market_daily"
+                    ).fetchone()
+                self._json(HTTPStatus.OK, {"start": lower.isoformat() if lower else None,
+                                           "end": upper.isoformat() if upper else None})
+                return
             parts = path.strip("/").split("/")
+            if len(parts) == 5 and parts[:4] == ["api", "v1", "factors", "batches"]:
+                self._json(HTTPStatus.OK, batch_manager.status(parts[4]))
+                return
             if len(parts) == 5 and parts[:4] == ["api", "v1", "factors", "jobs"]:
                 self._handle_factor_status(parts[4])
                 return
@@ -685,19 +1024,36 @@ def make_handler(
 
         def do_POST(self) -> None:  # noqa: N802
             path = urlparse(self.path).path
+            parts = path.strip("/").split("/")
             try:
                 payload = self._body()
                 if path == "/api/v1/m4/preflight":
                     self._json(HTTPStatus.OK, manager.preflight(payload))
                     return
+                if path == "/api/v1/factors/batches/preflight":
+                    self._json(HTTPStatus.OK, batch_manager.preflight(payload))
+                    return
+                if path == "/api/v1/factors/batches":
+                    if manager.running() or factor_manager.running():
+                        raise RuntimeError("请等待当前因子或 M4 任务完成后再开始批次")
+                    self._json(HTTPStatus.ACCEPTED, batch_manager.start(payload))
+                    return
+                if len(parts) == 6 and parts[:4] == ["api", "v1", "factors", "batches"] and parts[5] == "stop":
+                    self._json(HTTPStatus.OK, batch_manager.stop(parts[4]))
+                    return
+                if len(parts) == 6 and parts[:4] == ["api", "v1", "factors", "batches"] and parts[5] == "retry":
+                    if manager.running() or factor_manager.running():
+                        raise RuntimeError("请等待当前因子或 M4 任务完成后再重试")
+                    self._json(HTTPStatus.ACCEPTED, batch_manager.retry_failed(parts[4]))
+                    return
                 if path == "/api/v1/m4/jobs":
-                    if factor_manager.running():
+                    if factor_manager.running() or batch_manager.running():
                         raise RuntimeError("a factor calculation is running; wait for it before starting M4")
                     self._json(HTTPStatus.ACCEPTED, manager.start(payload))
                     return
                 parts = path.strip("/").split("/")
                 if path == "/api/v1/factors/jobs":
-                    if manager.running():
+                    if manager.running() or batch_manager.running():
                         raise RuntimeError("an M4 job is running; wait for it before calculating a factor")
                     self._json(HTTPStatus.ACCEPTED, factor_manager.start(payload))
                     return
@@ -798,6 +1154,7 @@ def make_handler(
                     return parameters.get(name, [default])[-1]
 
                 status = first("status", "ALL").upper()
+                source = first("source", "ALL").upper()
                 sort_order = first("sortOrder", "desc").lower()
                 horizon_text = first("horizon", "")
                 result = query_factor_assets(
@@ -806,6 +1163,7 @@ def make_handler(
                     page_size=int(first("pageSize", "12")),
                     query=first("query", ""),
                     horizon=int(horizon_text) if horizon_text else None,
+                    source=source,  # type: ignore[arg-type]
                     status=status,  # type: ignore[arg-type]
                     sort_order=sort_order,  # type: ignore[arg-type]
                 )
@@ -902,7 +1260,8 @@ def main() -> int:
     origins = set(args.allow_origin or ("http://127.0.0.1:8872", "http://localhost:8872"))
     manager = JobManager(root)
     factor_manager = FactorJobManager(root)
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(root, origins, manager, factor_manager))
+    batch_manager = FactorBatchManager(root)
+    server = ThreadingHTTPServer((args.host, args.port), make_handler(root, origins, manager, factor_manager, batch_manager))
     print(f"M4 control API: http://{args.host}:{args.port}", flush=True)
     server.serve_forever()
     return 0

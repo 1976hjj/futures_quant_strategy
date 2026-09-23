@@ -412,7 +412,7 @@ def _register(
             PRIMARY KEY (factor_id, factor_version))"""
         )
         if catalog_profile == "m4.2":
-            for factor_id in ("price-momentum-20", "short-reversal-5", "overnight-gap-1"):
+            for factor_id in ("overnight-gap-1",):
                 connection.execute(
                     """INSERT OR IGNORE INTO metadata.factor_version_disposition VALUES
                     (?, '1.0.0', 'SUPERSEDED_DIAGNOSTIC', '2.0.0', ?, 'M4.2', ?)""",

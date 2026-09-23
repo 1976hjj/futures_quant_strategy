@@ -50,7 +50,10 @@ def test_asset_query_paginates_and_counts_identical_filtered_set() -> None:
     assert response["totalItems"] == 5
     assert response["totalPages"] == 3
     assert len(response["items"]) == 2
-    assert response["counts"] == {"total": 5, "tested": 5, "raw_only": 0, "with_execution": 0, "runs": 5}
+    assert response["counts"] == {
+        "total": 5, "tested": 5, "raw_only": 0, "with_execution": 0, "runs": 5,
+        "current": 5, "alpha158": 0, "jqdata": 0,
+    }
 
 
 def test_asset_query_groups_multiple_runs_of_one_factor_into_one_card() -> None:
@@ -62,7 +65,10 @@ def test_asset_query_groups_multiple_runs_of_one_factor_into_one_card() -> None:
     response = query_factor_assets([five_day, ten_day])
 
     assert response["totalItems"] == 1
-    assert response["counts"] == {"total": 1, "tested": 1, "raw_only": 0, "with_execution": 1, "runs": 2}
+    assert response["counts"] == {
+        "total": 1, "tested": 1, "raw_only": 0, "with_execution": 1, "runs": 2,
+        "current": 1, "alpha158": 0, "jqdata": 0,
+    }
     group = response["items"][0]
     assert group["factor_id"] == "same-factor"
     assert group["run_count"] == 2
@@ -80,6 +86,17 @@ def test_horizon_filter_keeps_only_matching_runs_inside_group() -> None:
     assert response["totalItems"] == 1
     assert response["items"][0]["run_count"] == 1
     assert response["items"][0]["runs"][0]["asset_id"] == "five-day"
+
+
+def test_asset_query_filters_by_source_without_changing_source_counts() -> None:
+    current = _asset("current", horizon=5, tested=True, execution=False, completed="2026-01-01")
+    alpha = _asset("alpha", horizon=5, tested=True, execution=False, completed="2026-01-02")
+    alpha["source_collection"] = "ALPHA158"
+    response = query_factor_assets([current, alpha], source="ALPHA158")
+
+    assert [item["factor_id"] for item in response["items"]] == ["factor-alpha"]
+    assert response["counts"]["current"] == 1
+    assert response["counts"]["alpha158"] == 1
 
 
 def test_asset_query_rejects_unbounded_or_unknown_filters() -> None:

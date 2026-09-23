@@ -21,29 +21,20 @@ STATUS_ORDER = {
 }
 
 CURRENT_LOCALIZATION: dict[str, tuple[str, FactorCategory, str]] = {
-    "price-momentum-20": ("20日价格动量", "动量", "观察过去20个交易日的复权价格趋势是否延续。"),
-    "short-reversal-5": ("5日短期反转", "动量", "给近期跌幅较大的股票更高分，检验短期冲击是否回补。"),
     "overnight-gap-1": ("隔夜跳空", "形态", "分离上一日收盘到当日开盘的隔夜价格变化。"),
-    "intraday-strength": ("日内强弱", "形态", "观察开盘到收盘的价格强弱。"),
-    "volume-shock-20": ("20日成交量异动", "量价", "比较当日成交量与过去20日平均水平。"),
-    "return-volatility-20": ("20日收益波动", "波动", "衡量过去20日收益率的波动程度。"),
     "amihud-illiquidity-20": ("20日非流动性", "流动性", "衡量单位成交金额对应的价格波动，数值越高越难交易。"),
-    "book-to-price": ("账面市值比", "估值", "市净率的倒数，用于观察账面价值相对市场价格的便宜程度。"),
-    "earnings-yield": ("盈利收益率", "估值", "市盈率的倒数，用于观察盈利相对市场价格的水平。"),
-    "log-size": ("对数市值", "风格", "用总市值的对数描述大盘与小盘风格。"),
     "roe-pit": ("时点可见净资产收益率", "质量", "只使用当时已经披露的ROE，观察企业盈利质量。"),
     "debt-to-assets-pit": ("时点可见资产负债率", "质量", "只使用当时已经披露的资产负债率，观察财务杠杆。"),
-    "wq-alpha101-reproduction": (
-        "WorldQuant Alpha101复现",
-        "形态",
-        "复现公开Alpha#101公式，用于验证外部因子接入流程。",
-    ),
 }
 
 
 def _release_index(project_root: Path) -> dict[tuple[str, str], list[dict[str, Any]]]:
     index: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for path in sorted((project_root / "data" / "factor_store" / "releases").glob("*/manifest.json")):
+        if (path.parent / "cohort_sources.json").exists():
+            # A shared M4.5 comparison asset is not a replacement for each
+            # factor's individually published, incrementally updatable release.
+            continue
         payload = json.loads(path.read_bytes())
         request = payload["request"]
         verification_path = path.parent / "accuracy_verification.json"
@@ -215,7 +206,7 @@ def build_factor_catalog_overview(project_root: Path) -> list[dict[str, Any]]:
                 "formula": spec.expression.formula if spec.expression else None,
                 "required_fields": list(spec.required_fields),
                 "source_collection": "CURRENT",
-                "source_label": "现有机制因子",
+                "source_label": "自定义因子",
                 **_dynamic_fields(published, result, alpha158=False),
             }
         )

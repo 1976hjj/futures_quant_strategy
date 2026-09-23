@@ -84,6 +84,7 @@ LOCAL_FORMULA_FACTORS = {
     "momentum",
     "natural_log_of_market_cap",
     "net_operating_cash_flow_coverage",
+    "resvol",
     "roa_ttm",
     "roe_ttm",
     "sharpe_ratio_60",
@@ -111,7 +112,10 @@ LOOKBACK_SESSIONS = {
     "beta": 252,
     "daily_standard_deviation": 252,
     "liquidity": 21,
-    "momentum": 252,
+    # lag(..., 252) needs 252 complete observations before the output session.
+    # Other 252-session rolling formulas include the current session and need 251.
+    "momentum": 253,
+    "resvol": 252,
     "sharpe_ratio_60": 60,
     "share_turnover_monthly": 21,
 }
@@ -133,6 +137,8 @@ def _register_with_lock_retry(*args: Any) -> None:
 
 
 def _engine_version(item: JQDataCatalogItem) -> str:
+    if item.external_name == "resvol":
+        return "jqdata-resvol-local-1.0.1"
     if item.external_name in FUNDAMENTAL_FORMULA_FACTORS:
         return FUNDAMENTAL_ENGINE_VERSION
     if item.external_name in LOCAL_FORMULA_FACTORS:
@@ -498,6 +504,19 @@ def _market_materialization_body(
         "Variance20": "CASE WHEN count(return_1d) OVER w20=20 THEN var_samp(return_1d) OVER w20*250.0 END",
         "liquidity": "CASE WHEN count(turnover_ratio) OVER w21=21 THEN ln(avg(turnover_ratio) OVER w21) END",
         "momentum": "lag(adjusted_close,21) OVER wp/nullif(lag(adjusted_close,252) OVER wp,0)-1",
+        "resvol": (
+            "CASE WHEN count(return_1d) OVER w252=252 "
+            "AND count(market_return) OVER w252=252 "
+            "AND var_samp(market_return) OVER w252>1e-12 THEN "
+            "0.50*sqrt(greatest(sum(raw_weight*return_1d*return_1d) OVER w252/"
+            "nullif(sum(raw_weight) OVER w252,0)-power(sum(raw_weight*return_1d) OVER w252/"
+            "nullif(sum(raw_weight) OVER w252,0),2),0)) + "
+            "0.42*sqrt(greatest(var_samp(return_1d) OVER w252-"
+            "power(covar_samp(return_1d,market_return) OVER w252,2)/"
+            "nullif(var_samp(market_return) OVER w252,0),0)) + "
+            "0.08*(max(ln(CASE WHEN adjusted_close>0 THEN adjusted_close END)) OVER w252-"
+            "min(ln(CASE WHEN adjusted_close>0 THEN adjusted_close END)) OVER w252) END"
+        ),
         "sharpe_ratio_60": (
             "CASE WHEN count(return_1d) OVER w60=60 "
             "AND stddev_samp(return_1d) OVER w60>1e-8 "
@@ -523,6 +542,7 @@ def _market_materialization_body(
       WITH base0 AS (
         SELECT u.trade_date AS session,u.ts_code AS instrument_id,u.eligible_for_signal,
           m.close,m.high,m.low,m.pre_close,{return_expression} AS return_1d,
+          row_number() OVER (PARTITION BY u.ts_code ORDER BY u.trade_date)::DOUBLE AS session_seq,
           b.turnover_rate/100.0 AS turnover_ratio,m.close*a.adj_factor AS adjusted_close,
           greatest(m.high-m.low,abs(m.high-m.pre_close),abs(m.low-m.pre_close)) AS true_range
         FROM research.security_session_state u
@@ -532,6 +552,7 @@ def _market_materialization_body(
         WHERE u.trade_date BETWEEN DATE {warm} AND DATE {end}
       ), base AS (
         SELECT *,avg(return_1d) FILTER(eligible_for_signal) OVER (PARTITION BY session) market_return,
+          power(0.5, -session_seq/42.0) AS raw_weight,
           adjusted_close/nullif(lag(adjusted_close,20) OVER wp,0)-1 trailing_return
         FROM base0 WINDOW wp AS (PARTITION BY instrument_id ORDER BY session)
       ), calculated AS (
@@ -568,7 +589,7 @@ def _local_materialization_sql(
         body = _fundamental_materialization_body(item, request, common_select)
     elif item.external_name in {
         "ATR6", "DAVOL10", "Rank1M", "Variance20", "beta", "book_to_price_ratio",
-        "liquidity", "momentum", "natural_log_of_market_cap", "sharpe_ratio_60",
+        "liquidity", "momentum", "natural_log_of_market_cap", "resvol", "sharpe_ratio_60",
     }:
         body = _market_materialization_body(item, request, common_select, warmup)
     elif item.external_name == "share_turnover_monthly":
@@ -733,6 +754,7 @@ def publish(
             database, store, manifest, content_hash(manifest), catalog, quality["factors"], "jqdata"
         )
         return {"cache_hit": True, "release_id": manifest.release_id,
+            "factor_version": manifest.request.factors[0].factor_version,
             "accuracy_status": accuracy_status(release_dir).get("status"),
             "manifest": str(manifest_path.resolve())}
 
@@ -780,6 +802,7 @@ def publish(
             "cache_hit": False,
             "release_id": manifest.release_id,
             "factor_id": factor_id,
+            "factor_version": spec.factor_version,
             "row_count": manifest.row_count,
             "session_count": manifest.session_count,
             "instrument_count": manifest.instrument_count,
