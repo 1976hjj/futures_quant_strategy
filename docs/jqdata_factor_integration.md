@@ -20,6 +20,13 @@
 
 页面仍把这些因子归在 `JQDATA` 分类，是为了说明公式来源，不代表数值来自聚宽。
 
+目录还包括 12 项按价值、质量、成长、风格、流动性和风险维度补充的“本地透明”因子：
+`sales_to_price_ratio`、`dividend_yield_ttm`、`operating_cashflow_to_ev_ttm`、
+`gross_margin_ttm`、`operating_margin_ttm`、`asset_turnover_ttm`、
+`operating_cashflow_to_debt`、`current_ratio`、`revenue_growth_yoy`、`nonlinear_size`、
+`turnover_cv_20`、`return_skewness_120`。它们在目录中明确标记为未逐字核验的本地公式，
+不会被表述为聚宽供应商公式的精确复刻。
+
 ## 为什么移除预期盈利收益率
 
 本地 `forecast_vip` 是上市公司的业绩预告，并不是分析师对未来一年的一致盈利预测，不能替代

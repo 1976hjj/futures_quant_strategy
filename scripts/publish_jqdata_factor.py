@@ -62,8 +62,8 @@ from scripts.publish_factor_release import (  # noqa: E402
 )
 
 PROVIDER_ENGINE_VERSION = "jqdata-factor-values-1.0.0"
-LOCAL_ENGINE_VERSION = "jqdata-public-formula-duckdb-1.2.0"
-FUNDAMENTAL_ENGINE_VERSION = "jqdata-public-formula-duckdb-1.1.0"
+LOCAL_ENGINE_VERSION = "jqdata-public-formula-duckdb-1.3.0"
+FUNDAMENTAL_ENGINE_VERSION = "jqdata-public-formula-duckdb-1.2.0"
 SIGNAL_CLOCK_VERSION = "cn-close-postclose-v1"
 SECURITY_BATCH_SIZE = 400
 LOCAL_FORMULA_FACTORS = {
@@ -77,18 +77,30 @@ LOCAL_FORMULA_FACTORS = {
     "book_to_price_ratio",
     "cash_flow_to_price_ratio",
     "cash_earnings_to_price_ratio",
+    "dividend_yield_ttm",
     "debt_to_equity_ratio",
     "earnings_to_price_ratio",
     "growth",
+    "gross_margin_ttm",
     "liquidity",
     "momentum",
     "natural_log_of_market_cap",
     "net_operating_cash_flow_coverage",
+    "nonlinear_size",
+    "operating_cashflow_to_debt",
+    "operating_cashflow_to_ev_ttm",
+    "operating_margin_ttm",
+    "asset_turnover_ttm",
+    "current_ratio",
+    "revenue_growth_yoy",
     "resvol",
     "roa_ttm",
     "roe_ttm",
     "sharpe_ratio_60",
     "share_turnover_monthly",
+    "sales_to_price_ratio",
+    "turnover_cv_20",
+    "return_skewness_120",
     "daily_standard_deviation",
 }
 FUNDAMENTAL_FORMULA_FACTORS = {
@@ -96,12 +108,19 @@ FUNDAMENTAL_FORMULA_FACTORS = {
     "adjusted_profit_to_total_profit",
     "cash_flow_to_price_ratio",
     "cash_earnings_to_price_ratio",
+    "operating_cashflow_to_ev_ttm",
     "debt_to_equity_ratio",
     "earnings_to_price_ratio",
     "growth",
     "net_operating_cash_flow_coverage",
     "roa_ttm",
     "roe_ttm",
+    "gross_margin_ttm",
+    "operating_margin_ttm",
+    "asset_turnover_ttm",
+    "operating_cashflow_to_debt",
+    "current_ratio",
+    "revenue_growth_yoy",
 }
 
 LOOKBACK_SESSIONS = {
@@ -118,6 +137,8 @@ LOOKBACK_SESSIONS = {
     "resvol": 252,
     "sharpe_ratio_60": 60,
     "share_turnover_monthly": 21,
+    "turnover_cv_20": 20,
+    "return_skewness_120": 120,
 }
 
 
@@ -159,7 +180,7 @@ def _catalog(item: JQDataCatalogItem) -> FactorCatalog:
         uri=JQDATA_FACTOR_SOURCE,
         original_identifier=item.external_name,
         license_note="Public factor definition from JoinQuant; provider values remain subject to JQData terms.",
-        formula_verified_against_primary_source=True,
+        formula_verified_against_primary_source=item.formula_verified_against_primary_source,
     )
     spec = FactorSpec(
         factor_id=item.factor_id,
@@ -187,7 +208,7 @@ def _catalog(item: JQDataCatalogItem) -> FactorCatalog:
         direction=FactorDirection.POSITIVE if item.expected_direction == "HIGH" else FactorDirection.NEGATIVE,
         implementation_hash=implementation_hash,
         generation_process=(
-            "On-demand local evaluation of the public JQData formula on governed PIT inputs."
+            "On-demand local evaluation of a transparent formula on governed PIT inputs."
             if local_formula
             else "On-demand single-factor retrieval from the official JQData get_factor_values API."
         ),
@@ -200,8 +221,11 @@ def _catalog(item: JQDataCatalogItem) -> FactorCatalog:
             family=item.family,
             source_reference=source,
             adaptation_notes=(
-                "The public JQData formula is evaluated on local PIT inputs; source-data differences can cause "
-                "small differences from the JQData board."
+                ("The public JQData formula is evaluated on local PIT inputs; source-data differences can cause "
+                 "small differences from the JQData board.")
+                if item.formula_verified_against_primary_source else
+                ("A transparent local formula is evaluated on PIT inputs. It is a research proxy and is not "
+                 "claimed to reproduce an opaque vendor implementation exactly.")
                 if local_formula
                 else "No local proxy formula is used. JQData's published point-in-time factor value is joined "
                 "to the system's point-in-time eligible universe by session and security code."
@@ -355,6 +379,19 @@ def _fundamental_materialization_body(
             "c.operating_cashflow_ttm / nullif(i.net_income_parent_ttm, 0)"
         ),
         "debt_to_equity_ratio": "b.total_liabilities / nullif(b.equity_parent, 0)",
+        "operating_cashflow_to_ev_ttm": (
+            "CASE WHEN u.total_market_cap+coalesce(b.st_borr,0)+coalesce(b.non_cur_liab_due_1y,0)+"
+            "coalesce(b.lt_borr,0)+coalesce(b.bond_payable,0)-coalesce(b.money_cap,0)>0 "
+            "THEN c.operating_cashflow_ttm/nullif(u.total_market_cap+coalesce(b.st_borr,0)+"
+            "coalesce(b.non_cur_liab_due_1y,0)+coalesce(b.lt_borr,0)+coalesce(b.bond_payable,0)-"
+            "coalesce(b.money_cap,0),0) END"
+        ),
+        "gross_margin_ttm": "(i.total_revenue_ttm-i.operating_cost_ttm) / nullif(i.total_revenue_ttm, 0)",
+        "operating_margin_ttm": "i.operate_profit_ttm / nullif(i.total_revenue_ttm, 0)",
+        "asset_turnover_ttm": "i.total_revenue_ttm / nullif(b.total_assets, 0)",
+        "operating_cashflow_to_debt": "c.operating_cashflow_ttm / nullif(b.total_liabilities, 0)",
+        "current_ratio": "b.total_cur_assets / nullif(b.total_cur_liab, 0)",
+        "revenue_growth_yoy": "f.or_yoy / 100.0",
         "growth": (
             "(coalesce(f.or_yoy,0)+coalesce(f.netprofit_yoy,0)+coalesce(f.assets_yoy,0)) "
             "/ nullif((f.or_yoy IS NOT NULL)::INT+(f.netprofit_yoy IS NOT NULL)::INT+"
@@ -370,7 +407,10 @@ def _fundamental_materialization_body(
           coalesce(try_strptime(f_ann_date,'%Y%m%d')::DATE,try_strptime(ann_date,'%Y%m%d')::DATE) AS available_date,
           try_strptime(end_date,'%Y%m%d')::DATE AS period_end,
           try_cast(n_income_attr_p AS DOUBLE) AS net_income_parent,
-          try_cast(total_profit AS DOUBLE) AS total_profit
+          try_cast(total_profit AS DOUBLE) AS total_profit,
+          try_cast(total_revenue AS DOUBLE) AS total_revenue,
+          try_cast(operate_profit AS DOUBLE) AS operate_profit,
+          try_cast(oper_cost AS DOUBLE) AS operating_cost
         FROM raw.income_statement_versions
         WHERE coalesce(f_ann_date,ann_date) IS NOT NULL AND end_date IS NOT NULL
         QUALIFY row_number() OVER (
@@ -385,15 +425,21 @@ def _fundamental_materialization_body(
           CASE WHEN month(p.period_end)=12 THEN p.net_income_parent
             ELSE p.net_income_parent+a.net_income_parent-q.net_income_parent END net_income_parent_ttm,
           CASE WHEN month(p.period_end)=12 THEN p.total_profit
-            ELSE p.total_profit+a.total_profit-q.total_profit END total_profit_ttm
+            ELSE p.total_profit+a.total_profit-q.total_profit END total_profit_ttm,
+          CASE WHEN month(p.period_end)=12 THEN p.total_revenue
+            ELSE p.total_revenue+a.total_revenue-q.total_revenue END total_revenue_ttm,
+          CASE WHEN month(p.period_end)=12 THEN p.operate_profit
+            ELSE p.operate_profit+a.operate_profit-q.operate_profit END operate_profit_ttm,
+          CASE WHEN month(p.period_end)=12 THEN p.operating_cost
+            ELSE p.operating_cost+a.operating_cost-q.operating_cost END operating_cost_ttm
         FROM income_current p
         LEFT JOIN LATERAL (
-          SELECT x.net_income_parent,x.total_profit FROM income_versions x
+          SELECT x.net_income_parent,x.total_profit,x.total_revenue,x.operate_profit,x.operating_cost FROM income_versions x
           WHERE x.ts_code=p.ts_code AND x.period_end=make_date(year(p.period_end)-1,12,31)
             AND x.available_date<=p.available_date ORDER BY x.available_date DESC LIMIT 1
         ) a ON true
         LEFT JOIN LATERAL (
-          SELECT x.net_income_parent,x.total_profit FROM income_versions x
+          SELECT x.net_income_parent,x.total_profit,x.total_revenue,x.operate_profit,x.operating_cost FROM income_versions x
           WHERE x.ts_code=p.ts_code AND x.period_end=p.period_end-INTERVAL 1 YEAR
             AND x.available_date<=p.available_date ORDER BY x.available_date DESC LIMIT 1
         ) q ON true
@@ -435,7 +481,14 @@ def _fundamental_materialization_body(
           try_strptime(end_date,'%Y%m%d')::DATE AS period_end,
           try_cast(total_assets AS DOUBLE) AS total_assets,
           try_cast(total_liab AS DOUBLE) AS total_liabilities,
-          try_cast(total_hldr_eqy_exc_min_int AS DOUBLE) AS equity_parent
+          try_cast(total_hldr_eqy_exc_min_int AS DOUBLE) AS equity_parent,
+          try_cast(total_cur_assets AS DOUBLE) AS total_cur_assets,
+          try_cast(total_cur_liab AS DOUBLE) AS total_cur_liab,
+          try_cast(money_cap AS DOUBLE) AS money_cap,
+          try_cast(st_borr AS DOUBLE) AS st_borr,
+          try_cast(non_cur_liab_due_1y AS DOUBLE) AS non_cur_liab_due_1y,
+          try_cast(lt_borr AS DOUBLE) AS lt_borr,
+          try_cast(bond_payable AS DOUBLE) AS bond_payable
         FROM raw.balance_sheet_versions
         WHERE coalesce(f_ann_date,ann_date) IS NOT NULL AND end_date IS NOT NULL
         QUALIFY row_number() OVER (
@@ -480,18 +533,41 @@ def _market_materialization_body(
     start = _sql_string(request.start.isoformat())
     end = _sql_string(request.end.isoformat())
     warm = _sql_string(warmup.isoformat())
-    if item.external_name in {"book_to_price_ratio", "natural_log_of_market_cap"}:
-        expression = (
-            "1.0/nullif(b.pb,0)"
-            if item.external_name == "book_to_price_ratio"
-            else "ln(b.total_mv*10000.0)"
-        )
+    if item.external_name in {
+        "book_to_price_ratio", "natural_log_of_market_cap", "sales_to_price_ratio", "dividend_yield_ttm",
+    }:
+        expressions = {
+            "book_to_price_ratio": "1.0/nullif(b.pb,0)",
+            "natural_log_of_market_cap": "ln(b.total_mv*10000.0)",
+            "sales_to_price_ratio": "1.0/nullif(b.ps_ttm,0)",
+            "dividend_yield_ttm": "b.dv_ttm/100.0",
+        }
+        expression = expressions[item.external_name]
         return f"""
           WITH calculated AS (
             SELECT u.trade_date AS session,u.ts_code AS instrument_id,u.eligible_for_signal,
               {expression} AS candidate_value
             FROM research.security_session_state u LEFT JOIN research.daily_basic b USING(trade_date,ts_code)
             WHERE u.trade_date BETWEEN DATE {start} AND DATE {end}
+          ) SELECT {common_select} FROM calculated WHERE eligible_for_signal
+        """
+    if item.external_name == "nonlinear_size":
+        return f"""
+          WITH base AS (
+            SELECT u.trade_date AS session,u.ts_code AS instrument_id,u.eligible_for_signal,
+              ln(b.total_mv*10000.0) AS log_size
+            FROM research.security_session_state u LEFT JOIN research.daily_basic b USING(trade_date,ts_code)
+            WHERE u.trade_date BETWEEN DATE {start} AND DATE {end}
+          ), stats AS (
+            SELECT *,avg(log_size) FILTER(eligible_for_signal) OVER (PARTITION BY session) AS mean_size,
+              avg(power(log_size,3)) FILTER(eligible_for_signal) OVER (PARTITION BY session) AS mean_cubic_size,
+              covar_samp(log_size,power(log_size,3)) FILTER(eligible_for_signal) OVER (PARTITION BY session) AS covariance,
+              var_samp(log_size) FILTER(eligible_for_signal) OVER (PARTITION BY session) AS variance
+            FROM base
+          ), calculated AS (
+            SELECT *,CASE WHEN variance>1e-12 THEN power(log_size,3)-(
+              mean_cubic_size-covariance/variance*mean_size+covariance/variance*log_size
+            ) END AS candidate_value FROM stats
           ) SELECT {common_select} FROM calculated WHERE eligible_for_signal
         """
     return_expression = "m.close/nullif(m.pre_close,0)-1"
@@ -503,6 +579,13 @@ def _market_materialization_body(
         ),
         "Variance20": "CASE WHEN count(return_1d) OVER w20=20 THEN var_samp(return_1d) OVER w20*250.0 END",
         "liquidity": "CASE WHEN count(turnover_ratio) OVER w21=21 THEN ln(avg(turnover_ratio) OVER w21) END",
+        "turnover_cv_20": (
+            "CASE WHEN count(turnover_ratio) OVER w20=20 AND avg(turnover_ratio) OVER w20>0 "
+            "THEN stddev_samp(turnover_ratio) OVER w20/nullif(avg(turnover_ratio) OVER w20,0) END"
+        ),
+        "return_skewness_120": (
+            "CASE WHEN count(return_1d) OVER w120=120 THEN skewness(return_1d) OVER w120 END"
+        ),
         "momentum": "lag(adjusted_close,21) OVER wp/nullif(lag(adjusted_close,252) OVER wp,0)-1",
         "resvol": (
             "CASE WHEN count(return_1d) OVER w252=252 "
@@ -589,7 +672,8 @@ def _local_materialization_sql(
         body = _fundamental_materialization_body(item, request, common_select)
     elif item.external_name in {
         "ATR6", "DAVOL10", "Rank1M", "Variance20", "beta", "book_to_price_ratio",
-        "liquidity", "momentum", "natural_log_of_market_cap", "resvol", "sharpe_ratio_60",
+        "dividend_yield_ttm", "liquidity", "momentum", "natural_log_of_market_cap", "nonlinear_size",
+        "resvol", "return_skewness_120", "sales_to_price_ratio", "sharpe_ratio_60", "turnover_cv_20",
     }:
         body = _market_materialization_body(item, request, common_select, warmup)
     elif item.external_name == "share_turnover_monthly":

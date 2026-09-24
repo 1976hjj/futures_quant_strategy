@@ -324,3 +324,7 @@ M1 不从真实数据下载开始，而从敌对合成数据和契约开始。�
 - 被 Agent 或研究进程尝试读取的锁箱数据。
 
 系统必须首先证明它能够拒绝这些错误，然后才允许接入真实因子库。
+
+重启前端后端：
+cd D:\futures_quant_strategy
+powershell -ExecutionPolicy Bypass -File .\run.ps1

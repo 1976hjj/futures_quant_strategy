@@ -38,6 +38,18 @@ CANDIDATE_FACTOR_IDS = (
     "jqdata-davol10",
     "jqdata-liquidity",
     "jqdata-natural-log-of-market-cap",
+    "jqdata-sales-to-price-ratio",
+    "jqdata-dividend-yield-ttm",
+    "jqdata-operating-cashflow-to-ev-ttm",
+    "jqdata-gross-margin-ttm",
+    "jqdata-operating-margin-ttm",
+    "jqdata-asset-turnover-ttm",
+    "jqdata-operating-cashflow-to-debt",
+    "jqdata-current-ratio",
+    "jqdata-revenue-growth-yoy",
+    "jqdata-nonlinear-size",
+    "jqdata-turnover-cv-20",
+    "jqdata-return-skewness-120",
 )
 
 

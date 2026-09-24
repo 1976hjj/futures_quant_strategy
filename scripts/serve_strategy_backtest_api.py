@@ -10,7 +10,9 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import uuid
+from collections import deque
 from datetime import date, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -157,73 +159,295 @@ def rotation_options(project_root: Path) -> dict[str, Any]:
 
 
 class StrategyJobManager:
-    def __init__(self, project_root: Path) -> None:
+    def __init__(self, project_root: Path, *, start_dispatcher: bool = True) -> None:
         self.project_root = project_root
         self.run_root = project_root / "reports" / "strategy_backtests"
         self.run_root.mkdir(parents=True, exist_ok=True)
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
+        self.condition = threading.Condition(self.lock)
         self.process: subprocess.Popen[bytes] | None = None
         self.active_job_id: str | None = None
+        self.active_pid: int | None = None
+        self.pending_jobs: deque[str] = deque()
         self.stopped_jobs: set[str] = set()
+        self._recover_queue()
+        self.dispatcher: threading.Thread | None = None
+        if start_dispatcher:
+            self.dispatcher = threading.Thread(
+                target=self._dispatch_loop,
+                name="strategy-backtest-dispatcher",
+                daemon=True,
+            )
+            self.dispatcher.start()
 
     def running(self) -> bool:
-        return self.process is not None and self.process.poll() is None
+        with self.lock:
+            if self.active_job_id is None:
+                return False
+            if self.process is not None:
+                return self.process.poll() is None
+            return self.active_pid is not None and self._pid_alive(self.active_pid)
+
+    def has_pending(self) -> bool:
+        with self.lock:
+            return bool(self.pending_jobs)
+
+    @staticmethod
+    def _pid_alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except (OSError, ProcessLookupError):
+            return False
+        return True
+
+    def _state_path(self, job_id: str) -> Path:
+        return self.run_root / f"{job_id}.state.json"
+
+    def _read_state(self, job_id: str) -> dict[str, Any]:
+        path = self._state_path(job_id)
+        if not path.exists():
+            return {}
+        try:
+            value = json.loads(path.read_bytes())
+            return value if isinstance(value, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _write_state(self, job_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+        state = {**self._read_state(job_id), **patch, "job_id": job_id}
+        path = self._state_path(job_id)
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        temporary.write_bytes(canonical_json_bytes(state) + b"\n")
+        os.replace(temporary, path)
+        return state
+
+    def _recover_queue(self) -> None:
+        """Recover only queue-aware jobs; legacy history must never be rerun."""
+        queued: list[tuple[str, str]] = []
+        recovered_active = False
+        for state_path in self.run_root.glob("*.state.json"):
+            job_id = state_path.name.removesuffix(".state.json")
+            state = self._read_state(job_id)
+            status = state.get("status")
+            if status == "QUEUED":
+                queued.append((str(state.get("queued_at") or ""), job_id))
+            elif status == "RUNNING":
+                pid = state.get("pid")
+                if not recovered_active and isinstance(pid, int) and self._pid_alive(pid):
+                    self.active_job_id = job_id
+                    self.active_pid = pid
+                    recovered_active = True
+                else:
+                    self._write_state(
+                        job_id,
+                        {
+                            "status": "QUEUED",
+                            "phase": "等待队列中",
+                            "progress": 0,
+                            "pid": None,
+                            "started_at": None,
+                            "queued_at": state.get("queued_at") or state.get("created_at"),
+                        },
+                    )
+                    queued.append((str(state.get("queued_at") or state.get("created_at") or ""), job_id))
+        for _, job_id in sorted(queued):
+            self.pending_jobs.append(job_id)
+
+    def _dispatch_loop(self) -> None:
+        while True:
+            with self.condition:
+                if self.active_job_id is not None and self.process is None and self.active_pid is not None:
+                    recovered_job_id = self.active_job_id
+                    recovered_pid = self.active_pid
+                else:
+                    recovered_job_id = None
+                    recovered_pid = None
+                while recovered_job_id is None and (self.active_job_id is not None or not self.pending_jobs):
+                    self.condition.wait(timeout=1.0)
+                    if self.active_job_id is not None and self.process is None and self.active_pid is not None:
+                        recovered_job_id = self.active_job_id
+                        recovered_pid = self.active_pid
+                        break
+                if recovered_job_id is not None:
+                    job_id = recovered_job_id
+                else:
+                    job_id = self.pending_jobs.popleft()
+                    self.active_job_id = job_id
+
+            if recovered_job_id is not None:
+                assert recovered_pid is not None
+                while self._pid_alive(recovered_pid):
+                    time.sleep(1.0)
+                result_path = self.run_root / f"{job_id}.result.json"
+                with self.condition:
+                    state = self._read_state(job_id)
+                    if state.get("status") != "STOPPED":
+                        self._write_state(
+                            job_id,
+                            {
+                                "status": "PASS" if result_path.exists() else "FAIL",
+                                "phase": "回测完成" if result_path.exists() else "回测进程异常结束",
+                                "progress": 100 if result_path.exists() else state.get("progress", 0),
+                                "finished_at": datetime.now().astimezone().isoformat(),
+                                "pid": None,
+                            },
+                        )
+                    self.active_job_id = None
+                    self.active_pid = None
+                    self.condition.notify_all()
+                continue
+
+            request_path = self.run_root / f"{job_id}.request.json"
+            result_path = self.run_root / f"{job_id}.result.json"
+            log_path = self.run_root / f"{job_id}.log"
+            progress_path = self.run_root / f"{job_id}.progress.json"
+            stream = None
+            process = None
+            try:
+                request = json.loads(request_path.read_bytes())
+                runner = (
+                    "scripts/run_rotation_backtest.py"
+                    if request.get("strategy_type") == "ROTATION"
+                    else "scripts/run_strategy_backtest.py"
+                )
+                stream = log_path.open("ab")
+                environment = os.environ.copy()
+                environment["PYTHONPATH"] = os.pathsep.join((str(SRC_ROOT), str(PROJECT_ROOT)))
+                # Prevent one queued job from expanding into many BLAS workers.
+                for variable in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+                    environment[variable] = "1"
+                process = subprocess.Popen(
+                    [
+                        sys.executable,
+                        runner,
+                        "--project-root", str(self.project_root),
+                        "--request", str(request_path),
+                        "--result", str(result_path),
+                        "--progress", str(progress_path),
+                    ],
+                    cwd=self.project_root,
+                    env=environment,
+                    stdout=stream,
+                    stderr=subprocess.STDOUT,
+                )
+                with self.condition:
+                    self.process = process
+                    self.active_pid = process.pid
+                    self._write_state(
+                        job_id,
+                        {
+                            "status": "RUNNING",
+                            "phase": "准备数据",
+                            "progress": 3,
+                            "started_at": datetime.now().astimezone().isoformat(),
+                            "pid": process.pid,
+                        },
+                    )
+                exit_code = process.wait()
+            except BaseException as error:
+                exit_code = -1
+                with self.condition:
+                    self._write_state(
+                        job_id,
+                        {
+                            "status": "FAIL",
+                            "phase": "任务启动失败",
+                            "error_message": str(error),
+                        },
+                    )
+            finally:
+                if stream is not None:
+                    stream.close()
+
+            with self.condition:
+                state = self._read_state(job_id)
+                stopped = state.get("status") == "STOPPED" or job_id in self.stopped_jobs
+                succeeded = result_path.exists() and not stopped
+                self._write_state(
+                    job_id,
+                    {
+                        "status": "STOPPED" if stopped else "PASS" if succeeded else "FAIL",
+                        "phase": "已取消" if stopped else "回测完成" if succeeded else "回测失败",
+                        "progress": 100 if succeeded else state.get("progress", 0),
+                        "finished_at": datetime.now().astimezone().isoformat(),
+                        "exit_code": exit_code,
+                        "pid": None,
+                    },
+                )
+                self.process = None
+                self.active_job_id = None
+                self.active_pid = None
+                self.condition.notify_all()
 
     def start(self, payload: dict[str, Any]) -> dict[str, Any]:
         is_rotation = payload.get("strategy_type") == "ROTATION"
         if is_rotation:
             request = RotationBacktestRequest.model_validate(payload)
             preflight_rotation(self.project_root, request)
-            runner = "scripts/run_rotation_backtest.py"
         else:
             request = StrategyBacktestRequest.model_validate(payload)
             # Starting a job must return promptly; the worker performs the
             # complete backtest after the lightweight request validation.
             preflight(self.project_root, request)
-            runner = "scripts/run_strategy_backtest.py"
-        with self.lock:
-            if self.running():
-                raise RuntimeError(f"strategy job {self.active_job_id} is already running")
+        with self.condition:
             job_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
             request_path = self.run_root / f"{job_id}.request.json"
-            result_path = self.run_root / f"{job_id}.result.json"
-            log_path = self.run_root / f"{job_id}.log"
-            progress_path = self.run_root / f"{job_id}.progress.json"
             request_path.write_bytes(canonical_json_bytes(request) + b"\n")
-            stream = log_path.open("wb")
-            environment = os.environ.copy()
-            environment["PYTHONPATH"] = os.pathsep.join((str(SRC_ROOT), str(PROJECT_ROOT)))
-            self.process = subprocess.Popen(
-                [
-                    sys.executable,
-                    runner,
-                    "--project-root", str(self.project_root),
-                    "--request", str(request_path),
-                    "--result", str(result_path),
-                    "--progress", str(progress_path),
-                ],
-                cwd=self.project_root,
-                env=environment,
-                stdout=stream,
-                stderr=subprocess.STDOUT,
+            now = datetime.now().astimezone().isoformat()
+            self._write_state(
+                job_id,
+                {
+                    "status": "QUEUED",
+                    "phase": "等待队列中",
+                    "progress": 0,
+                    "created_at": now,
+                    "queued_at": now,
+                    "started_at": None,
+                    "finished_at": None,
+                    "pid": None,
+                    "exit_code": None,
+                    "error_message": None,
+                },
             )
-            self.active_job_id = job_id
-            threading.Thread(target=self._wait_and_close, args=(self.process, stream), daemon=True).start()
+            self.pending_jobs.append(job_id)
+            self.condition.notify_all()
         return self.status(job_id)
-
-    @staticmethod
-    def _wait_and_close(process: subprocess.Popen[bytes], stream: Any) -> None:
-        process.wait()
-        stream.close()
 
     def stop(self, job_id: str) -> dict[str, Any]:
-        with self.lock:
+        with self.condition:
+            if job_id in self.pending_jobs:
+                self.pending_jobs.remove(job_id)
+                self.stopped_jobs.add(job_id)
+                self._write_state(
+                    job_id,
+                    {
+                        "status": "STOPPED",
+                        "phase": "已取消排队",
+                        "finished_at": datetime.now().astimezone().isoformat(),
+                    },
+                )
+                self.condition.notify_all()
+                return self.status(job_id)
             if self.active_job_id != job_id or not self.running():
-                raise ValueError("strategy job is not running")
-            assert self.process is not None
+                raise ValueError("strategy job is not queued or running")
             self.stopped_jobs.add(job_id)
-            self.process.terminate()
+            self._write_state(job_id, {"status": "STOPPED", "phase": "正在停止"})
+            if self.process is not None:
+                self.process.terminate()
+            elif self.active_pid is not None:
+                os.kill(self.active_pid, 15)
         return self.status(job_id)
+
+    def queue(self) -> dict[str, Any]:
+        with self.lock:
+            return {
+                "mode": "SERIAL",
+                "max_concurrency": 1,
+                "running_count": 1 if self.running() else 0,
+                "running_job_id": self.active_job_id,
+                "queued_count": len(self.pending_jobs),
+                "queued_job_ids": list(self.pending_jobs),
+            }
 
     def status(self, job_id: str) -> dict[str, Any]:
         if not job_id.replace("-", "").isalnum():
@@ -232,9 +456,14 @@ class StrategyJobManager:
         result_path = self.run_root / f"{job_id}.result.json"
         log_path = self.run_root / f"{job_id}.log"
         progress_path = self.run_root / f"{job_id}.progress.json"
+        state_path = self._state_path(job_id)
         if not request_path.exists():
             raise FileNotFoundError(job_id)
-        active = self.active_job_id == job_id and self.running()
+        with self.lock:
+            active = self.active_job_id == job_id and self.running()
+            pending = job_id in self.pending_jobs
+            queue_position = list(self.pending_jobs).index(job_id) + 1 if pending else None
+            state = self._read_state(job_id)
         stored_result = json.loads(result_path.read_bytes()) if result_path.exists() else None
         # Transaction rows can be numerous.  They are deliberately loaded only
         # by the year-specific endpoint, not whenever a result card is opened.
@@ -247,9 +476,15 @@ class StrategyJobManager:
             benchmark = self._benchmark_for_result(result)
             if benchmark is not None:
                 result["benchmark"] = benchmark
-        exit_code = self.process.poll() if self.active_job_id == job_id and self.process is not None else None
+        exit_code = state.get("exit_code")
+        if self.active_job_id == job_id and self.process is not None:
+            exit_code = self.process.poll()
         if stored_result:
             status = "PASS"
+        elif pending:
+            status = "QUEUED"
+        elif state.get("status") in {"QUEUED", "RUNNING", "FAIL", "STOPPED"}:
+            status = str(state["status"])
         elif job_id in self.stopped_jobs:
             status = "STOPPED"
         elif active:
@@ -269,18 +504,27 @@ class StrategyJobManager:
                 pass
         if result:
             phase, progress = "回测完成", 100
+        elif status == "QUEUED":
+            phase, progress = "等待队列中", 0
         elif active and progress_detail:
             phase = str(progress_detail.get("phase") or "正在运行")
             progress = int(progress_detail.get("progress") or 1)
         elif "publishing backtest report" in log_tail:
             phase, progress = "生成报告", 90
+        elif status in {"FAIL", "STOPPED"}:
+            phase = str(state.get("phase") or ("回测失败" if status == "FAIL" else "已取消"))
+            progress = int(state.get("progress") or progress_detail.get("progress") or 0)
         else:
             # Until the worker publishes its progress file, keep the job at the
             # initial value. Log output is not an authoritative progress source.
             phase, progress = "准备数据", 3
         request = json.loads(request_path.read_bytes())
-        created_at = datetime.fromtimestamp(request_path.stat().st_mtime).astimezone()
-        updated_paths = (request_path, log_path, result_path, progress_path)
+        created_at = (
+            datetime.fromisoformat(state["created_at"])
+            if state.get("created_at")
+            else datetime.fromtimestamp(request_path.stat().st_mtime).astimezone()
+        )
+        updated_paths = (request_path, log_path, result_path, progress_path, state_path)
         return {
             "job_id": job_id, "status": status, "phase": phase, "progress": progress,
             "name": request["name"],
@@ -297,7 +541,25 @@ class StrategyJobManager:
             ).astimezone().isoformat(),
             "request": request,
             "process_alive": active,
-            "elapsed_seconds": max(0, int((datetime.now().astimezone() - created_at).total_seconds())),
+            "queue_position": queue_position,
+            "jobs_ahead": queue_position - 1 if queue_position is not None else None,
+            "queued_at": state.get("queued_at"),
+            "started_at": state.get("started_at"),
+            "finished_at": state.get("finished_at"),
+            "error_message": state.get("error_message"),
+            "elapsed_seconds": max(
+                0,
+                int(
+                    (
+                        datetime.now().astimezone()
+                        - (
+                            datetime.fromisoformat(state["started_at"])
+                            if state.get("started_at")
+                            else created_at
+                        )
+                    ).total_seconds()
+                ),
+            ),
             **{
                 key: progress_detail.get(key)
                 for key in (
@@ -448,13 +710,16 @@ class StrategyJobManager:
         result_path = self.run_root / f"{job_id}.result.json"
         progress_path = self.run_root / f"{job_id}.progress.json"
         log_path = self.run_root / f"{job_id}.log"
+        state_path = self._state_path(job_id)
         request = json.loads(request_path.read_bytes())
-        active = self.active_job_id == job_id and self.running()
-        exit_code = (
-            self.process.poll()
-            if self.active_job_id == job_id and self.process is not None
-            else None
-        )
+        with self.lock:
+            active = self.active_job_id == job_id and self.running()
+            pending = job_id in self.pending_jobs
+            queue_position = list(self.pending_jobs).index(job_id) + 1 if pending else None
+            state = self._read_state(job_id)
+        exit_code = state.get("exit_code")
+        if self.active_job_id == job_id and self.process is not None:
+            exit_code = self.process.poll()
         result_summary: dict[str, Any] | None = None
         progress_detail: dict[str, Any] = {}
         if result_path.exists():
@@ -465,7 +730,11 @@ class StrategyJobManager:
             result_summary = listing.get("result_summary")
         else:
             listing = {}
-            if job_id in self.stopped_jobs:
+            if pending:
+                status = "QUEUED"
+            elif state.get("status") in {"QUEUED", "RUNNING", "FAIL", "STOPPED"}:
+                status = str(state["status"])
+            elif job_id in self.stopped_jobs:
                 status = "STOPPED"
             elif active:
                 status = "RUNNING"
@@ -473,17 +742,32 @@ class StrategyJobManager:
                 status = "FAIL"
             else:
                 status = "STOPPED"
-            if progress_path.exists():
+            if status != "QUEUED" and progress_path.exists():
                 try:
                     loaded = json.loads(progress_path.read_bytes())
                     if isinstance(loaded, dict):
                         progress_detail = loaded
                 except (OSError, json.JSONDecodeError):
                     pass
-            phase = str(progress_detail.get("phase") or "准备数据")
-            progress = int(progress_detail.get("progress") or 3)
-        created_at = datetime.fromtimestamp(request_path.stat().st_mtime).astimezone()
-        updated_paths = (request_path, log_path, result_path, progress_path, self._summary_path(result_path))
+            phase = (
+                "等待队列中"
+                if status == "QUEUED"
+                else str(progress_detail.get("phase") or state.get("phase") or "准备数据")
+            )
+            progress = 0 if status == "QUEUED" else int(progress_detail.get("progress") or state.get("progress") or 3)
+        created_at = (
+            datetime.fromisoformat(state["created_at"])
+            if state.get("created_at")
+            else datetime.fromtimestamp(request_path.stat().st_mtime).astimezone()
+        )
+        updated_paths = (
+            request_path,
+            log_path,
+            result_path,
+            progress_path,
+            state_path,
+            self._summary_path(result_path),
+        )
         progress_payload = {
             key: progress_detail.get(key)
             for key in (
@@ -498,7 +782,7 @@ class StrategyJobManager:
             "universe_id", "universe_segments", "rebalance_sessions", "target_count",
             "retention_rank", "score_rules", "filter_rules", "minimum_cash_fraction",
         ):
-            if request.get(field) is not None:
+            if request.get(field) not in (None, []):
                 listing_request[field] = request[field]
         shadow_health = request.get("shadow_health")
         if isinstance(shadow_health, dict):
@@ -543,7 +827,25 @@ class StrategyJobManager:
             ).astimezone().isoformat(),
             "request": listing_request,
             "process_alive": active,
-            "elapsed_seconds": max(0, int((datetime.now().astimezone() - created_at).total_seconds())),
+            "queue_position": queue_position,
+            "jobs_ahead": queue_position - 1 if queue_position is not None else None,
+            "queued_at": state.get("queued_at"),
+            "started_at": state.get("started_at"),
+            "finished_at": state.get("finished_at"),
+            "error_message": state.get("error_message"),
+            "elapsed_seconds": max(
+                0,
+                int(
+                    (
+                        datetime.now().astimezone()
+                        - (
+                            datetime.fromisoformat(state["started_at"])
+                            if state.get("started_at")
+                            else created_at
+                        )
+                    ).total_seconds()
+                ),
+            ),
             "result_summary": comparison_summary or None,
             **progress_payload,
         }
@@ -572,13 +874,13 @@ class StrategyJobManager:
         if not job_id.replace("-", "").isalnum():
             raise ValueError("invalid job id")
         with self.lock:
-            if self.active_job_id == job_id and self.running():
-                raise RuntimeError("a running strategy job cannot be deleted")
+            if (self.active_job_id == job_id and self.running()) or job_id in self.pending_jobs:
+                raise RuntimeError("a queued or running strategy job cannot be deleted")
             request_path = self.run_root / f"{job_id}.request.json"
             if not request_path.exists():
                 raise FileNotFoundError(job_id)
             deleted: list[str] = []
-            for suffix in ("request.json", "result.json", "summary.json", "progress.json", "log"):
+            for suffix in ("request.json", "result.json", "summary.json", "progress.json", "state.json", "log"):
                 path = self.run_root / f"{job_id}.{suffix}"
                 if path.exists():
                     path.unlink()
@@ -615,6 +917,9 @@ def make_handler(project_root: Path, origins: set[str], manager: StrategyJobMana
                 return
             if path == "/api/v1/rotation/options":
                 self._json(HTTPStatus.OK, rotation_options(project_root))
+                return
+            if path == "/api/v1/strategy/queue":
+                self._json(HTTPStatus.OK, manager.queue())
                 return
             if path == "/api/v1/strategy/jobs":
                 kind = (parse_qs(parsed.query).get("kind") or [None])[0]
@@ -661,8 +966,10 @@ def make_handler(project_root: Path, origins: set[str], manager: StrategyJobMana
                     self._json(HTTPStatus.OK, data_plan(project_root, DataUpdateRequest.model_validate(payload)))
                     return
                 if path == "/api/v1/data/jobs" and data_manager is not None:
-                    if manager.running():
-                        raise RuntimeError("a strategy backtest is running; wait before updating the warehouse")
+                    if manager.running() or manager.has_pending():
+                        raise RuntimeError(
+                            "strategy backtests are running or queued; wait before updating the warehouse"
+                        )
                     self._json(HTTPStatus.ACCEPTED, data_manager.start(payload))
                     return
                 if len(parts) == 6 and parts[:4] == ["api", "v1", "strategy", "jobs"] and parts[5] == "stop":

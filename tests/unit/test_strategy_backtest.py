@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from datetime import date
 
 import duckdb
@@ -336,6 +338,104 @@ def test_strategy_job_history_is_persisted_and_sorted(tmp_path) -> None:
     deleted = manager.delete("20260908-130000-bbbbbb")
     assert deleted["deleted"] is True
     assert not newer.exists()
+
+
+def test_strategy_jobs_queue_serially_and_cancel_waiting_job(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("scripts.serve_strategy_backtest_api.preflight", lambda *_: {})
+    manager = StrategyJobManager(tmp_path, start_dispatcher=False)
+
+    first = manager.start(_request(name="first").model_dump(mode="json"))
+    second = manager.start(_request(name="second").model_dump(mode="json"))
+
+    assert first["status"] == "QUEUED"
+    assert first["queue_position"] == 1
+    assert second["status"] == "QUEUED"
+    assert second["queue_position"] == 2
+    assert manager.queue() == {
+        "mode": "SERIAL",
+        "max_concurrency": 1,
+        "running_count": 0,
+        "running_job_id": None,
+        "queued_count": 2,
+        "queued_job_ids": [first["job_id"], second["job_id"]],
+    }
+
+    stopped = manager.stop(first["job_id"])
+
+    assert stopped["status"] == "STOPPED"
+    assert stopped["phase"] == "已取消排队"
+    assert manager.status(second["job_id"])["queue_position"] == 1
+
+
+def test_strategy_queue_is_recovered_without_rerunning_legacy_history(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("scripts.serve_strategy_backtest_api.preflight", lambda *_: {})
+    manager = StrategyJobManager(tmp_path, start_dispatcher=False)
+    queued = manager.start(_request(name="recover me").model_dump(mode="json"))
+    legacy = manager.run_root / "20260908-130000-legacy.request.json"
+    legacy.write_text(
+        json.dumps({"name": "legacy", "start": "2025-01-01", "end": "2025-12-31", "score_rules": []}),
+        encoding="utf-8",
+    )
+
+    recovered = StrategyJobManager(tmp_path, start_dispatcher=False)
+
+    assert recovered.queue()["queued_job_ids"] == [queued["job_id"]]
+    assert recovered.status(queued["job_id"])["status"] == "QUEUED"
+    assert recovered.status("20260908-130000-legacy")["status"] == "STOPPED"
+
+
+def test_strategy_dispatcher_runs_exactly_one_job_then_starts_next(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("scripts.serve_strategy_backtest_api.preflight", lambda *_: {})
+    spawned = []
+
+    class FakeProcess:
+        def __init__(self, command: list[str]) -> None:
+            self.command = command
+            self.pid = 10_000 + len(spawned)
+            self.released = threading.Event()
+            self.exit_code = None
+
+        def poll(self):
+            return self.exit_code
+
+        def wait(self):
+            self.released.wait(timeout=3)
+            result_path = self.command[self.command.index("--result") + 1]
+            with open(result_path, "w", encoding="utf-8") as stream:
+                json.dump({"summary": {}}, stream)
+            self.exit_code = 0
+            return 0
+
+        def terminate(self):
+            self.exit_code = -15
+            self.released.set()
+
+    def fake_popen(command, **_kwargs):
+        process = FakeProcess(command)
+        spawned.append(process)
+        return process
+
+    monkeypatch.setattr("scripts.serve_strategy_backtest_api.subprocess.Popen", fake_popen)
+    manager = StrategyJobManager(tmp_path)
+    first = manager.start(_request(name="first").model_dump(mode="json"))
+    deadline = time.monotonic() + 2
+    while len(spawned) < 1 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    second = manager.start(_request(name="second").model_dump(mode="json"))
+
+    assert len(spawned) == 1
+    assert manager.status(second["job_id"])["status"] == "QUEUED"
+    assert manager.status(second["job_id"])["queue_position"] == 1
+
+    spawned[0].released.set()
+    deadline = time.monotonic() + 2
+    while len(spawned) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert len(spawned) == 2
+    assert manager.status(first["job_id"])["status"] == "PASS"
+    assert manager.status(second["job_id"])["status"] == "RUNNING"
+    spawned[1].released.set()
 
 
 def test_strategy_job_status_exposes_live_progress(tmp_path) -> None:

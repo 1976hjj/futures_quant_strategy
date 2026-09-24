@@ -23,6 +23,10 @@ def test_jqdata_catalog_contains_selected_originals_and_local_replacements() -> 
         "debt_to_equity_ratio", "growth", "momentum", "Rank1M", "Variance20",
         "sharpe_ratio_60", "beta", "ATR6", "DAVOL10", "liquidity",
         "natural_log_of_market_cap",
+        "sales_to_price_ratio", "dividend_yield_ttm", "operating_cashflow_to_ev_ttm",
+        "gross_margin_ttm", "operating_margin_ttm", "asset_turnover_ttm",
+        "operating_cashflow_to_debt", "current_ratio", "revenue_growth_yoy",
+        "nonlinear_size", "turnover_cv_20", "return_skewness_120",
     }
     by_name = {item.external_name: item for item in items}
     assert by_name["cash_earnings_to_price_ratio"].factor_version == "jqdata-factorlib-2"
@@ -43,19 +47,23 @@ def test_jqdata_catalog_contains_selected_originals_and_local_replacements() -> 
         "0.50 * daily_std + 0.42 * historical_resid_sigma + 0.08 * cum_range"
     )
     assert [item.expected_direction for item in items[:5]] == ["HIGH", "HIGH", "LOW", "LOW", "LOW"]
+    assert by_name["nonlinear_size"].factor_version == "jqdata-factorlib-local-3"
+    assert by_name["turnover_cv_20"].expected_direction == "LOW"
+    assert not by_name["turnover_cv_20"].formula_verified_against_primary_source
 
 
 def test_jqdata_catalog_is_a_separate_source_filter(tmp_path) -> None:
     response = query_factor_catalog(
         build_factor_catalog_overview(tmp_path), page=1, page_size=30, source="JQDATA"
     )
-    assert response["totalItems"] == 23
-    assert response["counts"]["jqdata"] == 23
+    assert response["totalItems"] == 35
+    assert response["counts"]["jqdata"] == 35
     assert all(item["source_collection"] == "JQDATA" for item in response["items"])
 
 
 def test_jqdata_factor_spec_preserves_direction_and_vendor_source() -> None:
-    high, *_, low = jqdata_catalog()
+    items = {item.external_name: item for item in jqdata_catalog()}
+    high, low = items["cash_earnings_to_price_ratio"], items["resvol"]
     assert _catalog(high).list()[0].entry.spec.direction.value == "POSITIVE"
     assert _catalog(low).list()[0].entry.spec.direction.value == "NEGATIVE"
     assert _catalog(high).list()[0].entry.source_reference.kind.value == "DATA_VENDOR"
@@ -63,8 +71,16 @@ def test_jqdata_factor_spec_preserves_direction_and_vendor_source() -> None:
 
 def test_fundamental_local_formulas_use_the_deterministic_engine() -> None:
     by_name = {item.external_name: item for item in jqdata_catalog()}
-    for name in ("cash_earnings_to_price_ratio", "earnings_to_price_ratio"):
+    for name in ("cash_earnings_to_price_ratio", "earnings_to_price_ratio", "gross_margin_ttm"):
         assert _engine_version(by_name[name]) == FUNDAMENTAL_ENGINE_VERSION
+
+
+def test_representative_local_formulas_have_expected_warmups_and_provenance() -> None:
+    by_name = {item.external_name: item for item in jqdata_catalog()}
+    assert _catalog(by_name["turnover_cv_20"]).list()[0].entry.spec.warmup_sessions == 19
+    assert _catalog(by_name["return_skewness_120"]).list()[0].entry.spec.warmup_sessions == 119
+    source = _catalog(by_name["sales_to_price_ratio"]).list()[0].entry.source_reference
+    assert not source.formula_verified_against_primary_source
 
 
 def test_jqdata_security_code_translation() -> None:

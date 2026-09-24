@@ -1,8 +1,8 @@
-"""Curated JoinQuant/JQData factors used by the first strategy research pass.
+"""Curated JoinQuant/JQData-style factors used by the strategy research pass.
 
-The formulas below are copied from JoinQuant's factor-board metadata. Publicly
-reproducible formulas are evaluated on governed local data. Factors that need
-unavailable analyst-consensus inputs are intentionally omitted.
+Where a vendor formula is public it is retained as provenance.  The explicitly
+marked local factors are transparent, point-in-time reproductions: their names
+describe the economic signal, not a claim of byte-for-byte vendor equivalence.
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ class JQDataCatalogItem(FrozenSpec):
     expected_direction: Literal["HIGH", "LOW"]
     source_id: str = "joinquant-jqdata-factorlib"
     source_uri: HttpUrl = JQDATA_FACTOR_SOURCE
+    formula_verified_against_primary_source: bool = True
     catalog_status: Literal["CATALOGED_NOT_CALCULATED"] = "CATALOGED_NOT_CALCULATED"
 
 
@@ -319,14 +320,168 @@ def jqdata_catalog() -> tuple[JQDataCatalogItem, ...]:
             required_fields=("total_mv",),
             expected_direction="LOW",
         ),
+        # The following are intentionally transparent local formulas.  They are
+        # representative value/quality/growth/size/liquidity/risk signals from
+        # the factor-library research screen, rather than claims about an exact
+        # opaque vendor implementation.
+        JQDataCatalogItem(
+            factor_id="jqdata-sales-to-price-ratio",
+            external_name="sales_to_price_ratio",
+            chinese_name="营收市值比（TTM）",
+            category="估值",
+            family="jqdata-valuation",
+            formula="1 / PS_TTM",
+            description="以当日可见的滚动市销率倒数衡量收入相对市值的便宜程度。",
+            required_fields=("ps_ttm",),
+            expected_direction="HIGH",
+            formula_verified_against_primary_source=False,
+        ),
+        JQDataCatalogItem(
+            factor_id="jqdata-dividend-yield-ttm",
+            external_name="dividend_yield_ttm",
+            chinese_name="股息率（TTM）",
+            category="估值",
+            family="jqdata-valuation",
+            formula="dv_ttm / 100",
+            description="当日可见的滚动十二个月现金股息收益率；零或缺失值不作填充。",
+            required_fields=("dv_ttm",),
+            expected_direction="HIGH",
+            formula_verified_against_primary_source=False,
+        ),
+        JQDataCatalogItem(
+            factor_id="jqdata-operating-cashflow-to-ev-ttm",
+            external_name="operating_cashflow_to_ev_ttm",
+            chinese_name="经营现金流企业价值比（TTM）",
+            category="估值",
+            family="jqdata-valuation",
+            formula="经营现金流TTM / (市值 + 有息负债 - 货币资金)",
+            description="以经营现金流相对企业价值衡量估值，企业价值非正时保留为空值。",
+            required_fields=("operating_cashflow", "total_mv", "debt", "money_cap"),
+            expected_direction="HIGH",
+            formula_verified_against_primary_source=False,
+        ),
+        JQDataCatalogItem(
+            factor_id="jqdata-gross-margin-ttm",
+            external_name="gross_margin_ttm",
+            chinese_name="毛利率（TTM）",
+            category="质量",
+            family="jqdata-quality",
+            formula="(营业总收入TTM - 营业成本TTM) / 营业总收入TTM",
+            description="用公告日可见财报构造的滚动毛利率。",
+            required_fields=("total_revenue", "oper_cost"),
+            expected_direction="HIGH",
+            formula_verified_against_primary_source=False,
+        ),
+        JQDataCatalogItem(
+            factor_id="jqdata-operating-margin-ttm",
+            external_name="operating_margin_ttm",
+            chinese_name="营业利润率（TTM）",
+            category="质量",
+            family="jqdata-quality",
+            formula="营业利润TTM / 营业总收入TTM",
+            description="经营利润相对收入的盈利质量；财报未完整时保留为空。",
+            required_fields=("operate_profit", "total_revenue"),
+            expected_direction="HIGH",
+            formula_verified_against_primary_source=False,
+        ),
+        JQDataCatalogItem(
+            factor_id="jqdata-asset-turnover-ttm",
+            external_name="asset_turnover_ttm",
+            chinese_name="总资产周转率（TTM）",
+            category="质量",
+            family="jqdata-quality",
+            formula="营业总收入TTM / 期末总资产",
+            description="收入相对最近可见期末总资产的运营效率，使用期末口径以保持 PIT 可复现。",
+            required_fields=("total_revenue", "total_assets"),
+            expected_direction="HIGH",
+            formula_verified_against_primary_source=False,
+        ),
+        JQDataCatalogItem(
+            factor_id="jqdata-operating-cashflow-to-debt",
+            external_name="operating_cashflow_to_debt",
+            chinese_name="经营现金流负债比（TTM）",
+            category="质量",
+            family="jqdata-quality",
+            formula="经营现金流TTM / 期末总负债",
+            description="以经营现金流覆盖全部负债的能力衡量偿债质量。",
+            required_fields=("operating_cashflow", "total_liabilities"),
+            expected_direction="HIGH",
+            formula_verified_against_primary_source=False,
+        ),
+        JQDataCatalogItem(
+            factor_id="jqdata-current-ratio",
+            external_name="current_ratio",
+            chinese_name="流动比率",
+            category="质量",
+            family="jqdata-quality",
+            formula="流动资产 / 流动负债",
+            description="最近公告期的短期偿债能力；流动负债非正或缺失时保留为空。",
+            required_fields=("total_cur_assets", "total_cur_liab"),
+            expected_direction="HIGH",
+            formula_verified_against_primary_source=False,
+        ),
+        JQDataCatalogItem(
+            factor_id="jqdata-revenue-growth-yoy",
+            external_name="revenue_growth_yoy",
+            chinese_name="营业收入同比增长率",
+            category="质量",
+            family="jqdata-growth",
+            formula="or_yoy / 100",
+            description="财报指标中的营业收入同比增速，按公告日期点时连接。",
+            required_fields=("or_yoy",),
+            expected_direction="HIGH",
+            formula_verified_against_primary_source=False,
+        ),
+        JQDataCatalogItem(
+            factor_id="jqdata-nonlinear-size",
+            external_name="nonlinear_size",
+            chinese_name="非线性市值",
+            category="风格",
+            family="jqdata-style",
+            formula="residual(ln(总市值)^3 ~ ln(总市值))",
+            description="每日横截面对数市值三次项对对数市值回归后的残差，刻画中等市值暴露。",
+            required_fields=("total_mv",),
+            expected_direction="HIGH",
+            formula_verified_against_primary_source=False,
+        ),
+        JQDataCatalogItem(
+            factor_id="jqdata-turnover-cv-20",
+            external_name="turnover_cv_20",
+            chinese_name="20日换手率相对波动率",
+            category="流动性",
+            family="jqdata-liquidity",
+            formula="std(turnover_rate, 20) / mean(turnover_rate, 20)",
+            description="完整 20 日窗口内换手率的变异系数，衡量交易活跃度的稳定性。",
+            required_fields=("turnover_rate",),
+            expected_direction="LOW",
+            formula_verified_against_primary_source=False,
+        ),
+        JQDataCatalogItem(
+            factor_id="jqdata-return-skewness-120",
+            external_name="return_skewness_120",
+            chinese_name="120日收益率偏度",
+            category="波动",
+            family="jqdata-risk",
+            formula="skewness(日收益率, 120)",
+            description="完整 120 日窗口的样本偏度，用于刻画收益分布尾部形态。",
+            required_fields=("close", "pre_close"),
+            expected_direction="HIGH",
+            formula_verified_against_primary_source=False,
+        ),
     )
-    # Local reproductions are versioned immutably. Version 2 adds strict full-window
-    # guards; momentum version 3 also corrects the full 252-session lag warmup.
+    # Local reproductions are versioned immutably.  The original local set keeps
+    # its released versions; this representative expansion starts at version 3.
+    representative_expansion = {
+        "sales_to_price_ratio", "dividend_yield_ttm", "operating_cashflow_to_ev_ttm",
+        "gross_margin_ttm", "operating_margin_ttm", "asset_turnover_ttm",
+        "operating_cashflow_to_debt", "current_ratio", "revenue_growth_yoy",
+        "nonlinear_size", "turnover_cv_20", "return_skewness_120",
+    }
     expanded = tuple(
         item.model_copy(update={
             "factor_version": (
                 "jqdata-factorlib-local-3"
-                if item.external_name == "momentum"
+                if item.external_name == "momentum" or item.external_name in representative_expansion
                 else "jqdata-factorlib-local-2"
             )
         })

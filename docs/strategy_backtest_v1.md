@@ -45,3 +45,17 @@ powershell -ExecutionPolicy Bypass -File scripts/start_strategy_backtest_api.ps1
 ```
 
 前端仍使用原来的启动方式，默认从 `http://127.0.0.1:8773/api/v1` 调用本模块；也可以用 `VITE_STRATEGY_API_URL` 覆盖地址。
+
+## 串行任务队列
+
+单因子回测、通用因子策略回测和多组合轮动回测共享同一条 FIFO 队列。系统始终只运行一个
+回测子进程；新任务在已有任务运行时返回 `QUEUED`，当前任务完成、失败或取消后自动启动队首任务。
+
+- `QUEUED`：页面显示队列位置和前方任务数，不显示伪进度；
+- `RUNNING`：继续使用任务自己的进度文件、阶段、心跳和交易日进度；
+- `PASS`、`FAIL`、`STOPPED`：分别表示完成、失败和取消；
+- 等待任务可以直接取消，运行任务停止后才会释放槽位；
+- 队列状态写入独立的 `state.json`，API 重启后恢复等待任务；
+- 单因子完成结果仍进入单因子报告，通用策略与轮动结果仍进入历史回测结果。
+
+队列摘要可通过 `GET /api/v1/strategy/queue` 查询。
