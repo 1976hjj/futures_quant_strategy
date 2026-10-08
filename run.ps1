@@ -7,6 +7,7 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = $PSScriptRoot
 $factorApiPort = 8771
 $backendPort = 8773
+$dataApiPort = 8774
 $frontendPort = 8872
 
 function Get-PortOwnerIds {
@@ -88,6 +89,8 @@ $backendOutLog = Join-Path $reportsPath "strategy-backtest-api-$serviceStartStam
 $backendErrLog = Join-Path $reportsPath "strategy-backtest-api-$serviceStartStamp.stderr.log"
 $factorApiOutLog = Join-Path $reportsPath "m4-control-api-$serviceStartStamp.stdout.log"
 $factorApiErrLog = Join-Path $reportsPath "m4-control-api-$serviceStartStamp.stderr.log"
+$dataApiOutLog = Join-Path $reportsPath "data-management-api-$serviceStartStamp.stdout.log"
+$dataApiErrLog = Join-Path $reportsPath "data-management-api-$serviceStartStamp.stderr.log"
 $frontendOutLog = Join-Path $reportsPath "strategy-frontend-$serviceStartStamp.stdout.log"
 $frontendErrLog = Join-Path $reportsPath "strategy-frontend-$serviceStartStamp.stderr.log"
 
@@ -142,6 +145,19 @@ $backendProcess = Start-Process `
     -WindowStyle Hidden `
     -PassThru
 
+# Reuse the independent data service if it is already listening; preserve its update jobs.
+if ((Get-PortOwnerIds -LocalPort $dataApiPort).Count -eq 0) {
+    Write-Host 'Starting independent data-management API...' -ForegroundColor Cyan
+    $dataApiProcess = Start-Process `
+        -FilePath $pythonCommand.Source `
+        -ArgumentList @('scripts/serve_data_update_api.py', '--port', "$dataApiPort", '--strategy-api-url', "http://127.0.0.1:$backendPort/api/v1") `
+        -WorkingDirectory $projectRoot `
+        -RedirectStandardOutput $dataApiOutLog `
+        -RedirectStandardError $dataApiErrLog `
+        -WindowStyle Hidden `
+        -PassThru
+}
+
 Write-Host 'Starting strategy frontend...' -ForegroundColor Cyan
 $frontendProcess = Start-Process `
     -FilePath $cmdCommand.Source `
@@ -155,6 +171,7 @@ $frontendProcess = Start-Process `
 try {
     Wait-ForHttp -Uri "http://127.0.0.1:$factorApiPort/api/v1/health" -ServiceName 'Factor-library API'
     Wait-ForHttp -Uri "http://127.0.0.1:$backendPort/api/v1/health" -ServiceName 'Backtest API'
+    Wait-ForHttp -Uri "http://127.0.0.1:$dataApiPort/api/v1/health" -ServiceName 'Data-management API'
     Wait-ForHttp -Uri "http://127.0.0.1:$frontendPort/" -ServiceName 'Frontend'
 }
 catch {
@@ -169,5 +186,6 @@ Write-Host 'Strategy backtest services are ready:' -ForegroundColor Green
 Write-Host "  Factor library: http://127.0.0.1:$factorApiPort/api/v1/health"
 Write-Host "  Frontend: http://127.0.0.1:$frontendPort/"
 Write-Host "  API:      http://127.0.0.1:$backendPort/api/v1/health"
+Write-Host "  Data API: http://127.0.0.1:$dataApiPort/api/v1/health"
 Write-Host "  Logs:     $reportsPath"
 Write-Host "  Process IDs: factor library $($factorApiProcess.Id), backend $($backendProcess.Id), frontend launcher $($frontendProcess.Id)"
