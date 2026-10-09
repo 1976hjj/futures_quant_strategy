@@ -12,6 +12,7 @@ dependencies = [
   "numpy>=2.0,<3",
   "pydantic>=2.10,<3",
   "pyarrow>=18,<24",
+  "pandas>=2.2,<4",
 ]
 
 [project.optional-dependencies]

@@ -75,6 +75,12 @@ def _preprocessing_spec(variant: str) -> PreprocessingSpec:
 
 
 def _request(parent: FactorReleaseManifest, variant: str) -> ProcessedFactorAssetRequest:
+    preprocessing = _preprocessing_spec(variant)
+    if all(f.factor_id.startswith("bank-") for f in parent.request.factors):
+        preprocessing = preprocessing.model_copy(update={
+            "preprocessing_id": preprocessing.preprocessing_id + "-bank",
+            "preprocessing_version": "1.0.0-bank-min5", "minimum_cross_section": 5,
+        })
     return ProcessedFactorAssetRequest(
         engine_version=ENGINE_VERSION,
         parent_release_id=parent.release_id,
@@ -85,7 +91,7 @@ def _request(parent: FactorReleaseManifest, variant: str) -> ProcessedFactorAsse
         start=parent.request.start,
         end=parent.request.end,
         variant=variant,
-        preprocessing=_preprocessing_spec(variant),
+        preprocessing=preprocessing,
     )
 
 

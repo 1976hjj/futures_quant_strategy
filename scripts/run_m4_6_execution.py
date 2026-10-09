@@ -311,7 +311,7 @@ def publish(
     capital: tuple[int, ...] = (1_000_000, 10_000_000, 100_000_000),
     execution_spec: DailyBarExecutionSpec | None = None,
 ) -> dict[str, Any]:
-    if holding_sessions not in {5, 10, 20, 30}:
+    if holding_sessions not in {5, 10, 20, 30, 63, 126}:
         raise ValueError("supported holding periods are 5, 10, 20, and 30 sessions")
     manifest, factor_manifest_path, factor_path = _factor_input(factor_store, release_id)
     spec = execution_spec or DailyBarExecutionSpec()

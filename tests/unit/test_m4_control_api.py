@@ -25,7 +25,7 @@ def _request(**updates: object) -> control.M4RunRequest:
 def test_ui_request_rejects_unknown_stage_or_holding_period() -> None:
     with pytest.raises(ValidationError, match="M4.1-M4.6"):
         _request(stages=["m4_8"])
-    with pytest.raises(ValidationError, match="5, 10, 20, or 30"):
+    with pytest.raises(ValidationError, match="5, 10, 20, 30, 63, or 126"):
         _request(holding_sessions=7)
 
 

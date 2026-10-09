@@ -77,7 +77,7 @@ class StrategyBacktestRequest(FrozenSpec):
     minimum_listed_sessions: int = Field(default=60, ge=0, le=1250)
     target_count: int = Field(default=50, ge=1, le=500)
     retention_rank: int = Field(default=75, ge=1, le=1000)
-    rebalance_sessions: int = Field(default=5, ge=1, le=60)
+    rebalance_sessions: int = Field(default=5, ge=1, le=126)
     initial_cash_cny: float = Field(default=1_000_000, gt=0)
     minimum_cash_fraction: float = Field(default=0.02, ge=0, lt=0.5)
     buy_commission_bps: float = Field(default=3, ge=0, le=100)

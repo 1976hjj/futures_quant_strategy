@@ -110,7 +110,7 @@ class ForwardReturnLabel(FrozenSpec):
 def forward_return_label_spec(horizon_sessions: int) -> LabelSpec:
     """T close signal; T+1 open entry; fixed close exit after the requested holding period."""
 
-    if horizon_sessions not in {5, 10, 20, 30}:
+    if horizon_sessions not in {5, 10, 20, 30, 63, 126}:
         raise ValueError("supported holding periods are 5, 10, 20, and 30 sessions")
     exit_offset = horizon_sessions + 1
     return LabelSpec(

@@ -52,7 +52,7 @@ def test_asset_query_paginates_and_counts_identical_filtered_set() -> None:
     assert len(response["items"]) == 2
     assert response["counts"] == {
         "total": 5, "tested": 5, "raw_only": 0, "with_execution": 0, "runs": 5,
-        "current": 5, "alpha158": 0, "jqdata": 0,
+        "current": 5, "alpha158": 0, "jqdata": 0, "bank": 0,
     }
 
 
@@ -67,7 +67,7 @@ def test_asset_query_groups_multiple_runs_of_one_factor_into_one_card() -> None:
     assert response["totalItems"] == 1
     assert response["counts"] == {
         "total": 1, "tested": 1, "raw_only": 0, "with_execution": 1, "runs": 2,
-        "current": 1, "alpha158": 0, "jqdata": 0,
+        "current": 1, "alpha158": 0, "jqdata": 0, "bank": 0,
     }
     group = response["items"][0]
     assert group["factor_id"] == "same-factor"

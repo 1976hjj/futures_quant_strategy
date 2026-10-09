@@ -39,6 +39,8 @@ def _job_id() -> str:
 def _publisher(factor_id: str) -> tuple[str, list[str]]:
     from alpha_research_os.factors.library import m4_2_factor_entries
 
+    if factor_id.startswith("bank-"):
+        return "scripts/publish_bank_factor.py", []
     current = {item.spec.factor_id for item in m4_2_factor_entries()}
     if factor_id in current:
         return "scripts/publish_factor_release.py", ["--catalog-profile", "m4.2"]

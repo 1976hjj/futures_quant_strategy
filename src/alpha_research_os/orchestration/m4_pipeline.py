@@ -101,7 +101,7 @@ class M4ExecutionConfig(FrozenSpec):
     window_start: date
     window_end: date
     source_execution_evidence_id: Digest | None = None
-    holding_sessions: Literal[5, 10, 20, 30] = 5
+    holding_sessions: Literal[5, 10, 20, 30, 63, 126] = 5
     selection_quantile: float = Field(default=0.20, gt=0, lt=1)
     capital_scenarios_cny: tuple[int, ...] = (1_000_000, 10_000_000, 100_000_000)
     buy_commission_bps: float = Field(default=3.0, ge=0)
@@ -126,7 +126,7 @@ class M4ExecutionConfig(FrozenSpec):
 class M4BasicEvidenceConfig(FrozenSpec):
     window_start: date | None = None
     window_end: date | None = None
-    holding_sessions: Literal[5, 10, 20, 30] = 5
+    holding_sessions: Literal[5, 10, 20, 30, 63, 126] = 5
     quantile_count: int = Field(default=5, ge=2, le=20)
     minimum_pairs_per_session: int = Field(default=20, ge=3)
 

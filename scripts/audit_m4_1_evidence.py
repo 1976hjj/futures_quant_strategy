@@ -208,7 +208,9 @@ def audit(
                 [crosscheck_session],
             ).fetchall()
         ]
-        independent = evaluate_basic_factor(factor_rows, label_rows)
+        independent = evaluate_basic_factor(
+            factor_rows, label_rows, quantile_count=evidence_manifest.request.quantile_count,
+        )
         stored_daily = connection.execute(
             f"""SELECT coverage,pearson_ic,rank_ic,paired_count
             FROM read_parquet('{_sql_path(daily_path)}') WHERE factor_id=? AND session=?""",

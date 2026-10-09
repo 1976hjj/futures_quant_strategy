@@ -29,6 +29,7 @@ for import_root in (PROJECT_ROOT, SRC_ROOT):
         sys.path.insert(0, str(import_root))
 
 from alpha_research_os.factors.alpha158 import alpha158_catalog  # noqa: E402
+from alpha_research_os.factors.bank import bank_factor_catalog  # noqa: E402
 from alpha_research_os.factors.jqdata import jqdata_catalog  # noqa: E402
 from alpha_research_os.factors.library import m4_2_factor_entries  # noqa: E402
 from alpha_research_os.kernel.canonical import canonical_json_bytes, content_hash  # noqa: E402
@@ -100,8 +101,8 @@ class M4RunRequest(BaseModel):
     @field_validator("holding_sessions")
     @classmethod
     def supported_holding_period(cls, value: int) -> int:
-        if value not in {5, 10, 20, 30}:
-            raise ValueError("holding_sessions must be 5, 10, 20, or 30")
+        if value not in {5, 10, 20, 30, 63, 126}:
+            raise ValueError("holding_sessions must be 5, 10, 20, 30, 63, or 126")
         return value
 
     @field_validator("stages")
@@ -140,18 +141,18 @@ class FactorComputeRequest(BaseModel):
     def valid_scope(self) -> FactorComputeRequest:
         if self.end < self.start:
             raise ValueError("end must not precede start")
-        catalog = {item.factor_id: item for item in (*alpha158_catalog(), *jqdata_catalog())}
+        catalog = {item.factor_id: item for item in (*alpha158_catalog(), *jqdata_catalog(), *bank_factor_catalog())}
         catalog.update({item.spec.factor_id: item.spec for item in m4_2_factor_entries()})
         item = catalog.get(self.factor_id)
         if item is None:
-            raise ValueError("factor is not in the current, Alpha158, or JQData catalog")
+            raise ValueError("factor is not in the current, Alpha158, JQData, or bank catalog")
         if item.factor_version != self.factor_version:
             raise ValueError("factor version does not match the catalog")
         return self
 
 
 class FactorBatchRequest(BaseModel):
-    factors: tuple[dict[str, str], ...] = Field(min_length=1, max_length=195)
+    factors: tuple[dict[str, str], ...] = Field(min_length=1, max_length=512)
     start: date
     end: date
     stages: tuple[str, ...] = ()
@@ -175,7 +176,7 @@ class FactorBatchRequest(BaseModel):
             raise ValueError("end must not precede start")
         if len({item.get("factor_id") for item in self.factors}) != len(self.factors):
             raise ValueError("batch factors must be unique")
-        catalog = {item.factor_id: item for item in (*alpha158_catalog(), *jqdata_catalog())}
+        catalog = {item.factor_id: item for item in (*alpha158_catalog(), *jqdata_catalog(), *bank_factor_catalog())}
         catalog.update({item.spec.factor_id: item.spec for item in m4_2_factor_entries()})
         for item in self.factors:
             known = catalog.get(item.get("factor_id"))
@@ -183,8 +184,8 @@ class FactorBatchRequest(BaseModel):
                 raise ValueError(f"factor or version is not in the current catalog: {item.get('factor_id')}")
         if len(self.stages) != len(set(self.stages)) or not set(self.stages).issubset(STAGE_LABELS):
             raise ValueError("unsupported or duplicate M4 stages")
-        if self.holding_sessions not in {5, 10, 20, 30}:
-            raise ValueError("holding_sessions must be 5, 10, 20, or 30")
+        if self.holding_sessions not in {5, 10, 20, 30, 63, 126}:
+            raise ValueError("holding_sessions must be 5, 10, 20, 30, 63, or 126")
         if "m4_5" in self.stages and len(self.factors) < 2:
             raise ValueError("M4.5 needs at least two selected factors")
         return self
@@ -556,7 +557,8 @@ class FactorJobManager:
             environment["PYTHONPATH"] = os.pathsep.join((str(SRC_ROOT), str(PROJECT_ROOT)))
             current_factor_ids = {item.spec.factor_id for item in m4_2_factor_entries()}
             publisher = (
-                "scripts/publish_factor_release.py" if request.factor_id in current_factor_ids
+                "scripts/publish_bank_factor.py" if request.factor_id.startswith("bank-")
+                else "scripts/publish_factor_release.py" if request.factor_id in current_factor_ids
                 else "scripts/publish_jqdata_factor.py" if request.factor_id.startswith("jqdata-")
                 else "scripts/publish_alpha158_factor.py"
             )
@@ -653,6 +655,12 @@ class FactorJobManager:
             message = f"已完成 {completed_years} 个年度，任务仍在运行。"
         elif "materializing" in log_tail:
             phase, progress, message = "计算因子值", 10, "计算进程正在运行，年度任务已经启动。"
+        elif "bank=" in log_tail:
+            bank_count = len(set(re.findall(r"bank=(\S+) rows=", log_tail)))
+            phase, progress, message = (
+                "计算银行因子", min(85, 10 + round(75 * bank_count / 42)),
+                f"已处理 {bank_count} 家银行；保留缺失值，随后逐键复核。",
+            )
         else:
             phase, progress, message = "准备任务", 3, "任务已接收，正在启动计算进程。"
         return {
@@ -698,6 +706,9 @@ def _batch_log_detail(path: Path) -> str | None:
     if last_stage is not None:
         lines = lines[last_stage + 1:]
     for line in reversed(lines):
+        bank = re.search(r"bank=(\S+) rows=(\d+)", line)
+        if bank:
+            return f"正在处理银行 {bank.group(1)} · {bank.group(2)} 个交易日"
         year = re.search(r"(?:conditional|daily|variant=\S+|factor=\S+) .*?year=(\d{4})", line)
         if year:
             variant = re.search(r"variant=(\S+)", line)
@@ -920,7 +931,7 @@ class FactorBatchManager:
         if not failures:
             raise ValueError("there are no failed factors to retry")
         payload = dict(current["request"])
-        catalog = {item.factor_id: item for item in (*alpha158_catalog(), *jqdata_catalog())}
+        catalog = {item.factor_id: item for item in (*alpha158_catalog(), *jqdata_catalog(), *bank_factor_catalog())}
         catalog.update({item.spec.factor_id: item.spec for item in m4_2_factor_entries()})
         payload["factors"] = [
             {
@@ -973,7 +984,7 @@ def make_handler(
                             {"id": stage, "label": label, "optional": stage == "m4_6"}
                             for stage, label in STAGE_LABELS.items()
                         ],
-                        "holding_sessions": [5, 10, 20, 30],
+                        "holding_sessions": [5, 10, 20, 30, 63, 126],
                         "processed_variants": ["WINSORIZED_ZSCORE", "SIZE_NEUTRALIZED"],
                     },
                 )
@@ -1120,7 +1131,7 @@ def make_handler(
                 status = first("status", "ALL").upper()
                 sort_by = first("sortBy", "category")
                 sort_order = first("sortOrder", "asc").lower()
-                if source not in {"ALL", "CURRENT", "ALPHA158", "JQDATA"}:
+                if source not in {"ALL", "CURRENT", "ALPHA158", "JQDATA", "BANK"}:
                     raise ValueError("unknown factor source")
                 if status not in {
                     "ALL", "M4_COMPLETE", "CALCULATED", "CALCULATED_VERIFYING",

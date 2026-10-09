@@ -10,7 +10,7 @@ from scripts.run_m4_1_evidence import _label_sql
 from scripts.run_m4_6_execution import _selected_sql
 
 
-@pytest.mark.parametrize("holding_sessions", [5, 10, 20, 30])
+@pytest.mark.parametrize("holding_sessions", [5, 10, 20, 30, 63, 126])
 def test_forward_label_contract_tracks_selected_holding_period(holding_sessions: int) -> None:
     spec = forward_return_label_spec(holding_sessions)
 

@@ -245,15 +245,15 @@ def query_factor_assets(
     page_size: int = 12,
     query: str = "",
     horizon: int | None = None,
-    source: Literal["ALL", "CURRENT", "ALPHA158", "JQDATA"] = "ALL",
+    source: Literal["ALL", "CURRENT", "ALPHA158", "JQDATA", "BANK"] = "ALL",
     status: Literal["ALL", "TESTED", "RAW_ONLY", "WITH_EXECUTION"] = "ALL",
     sort_order: Literal["asc", "desc"] = "desc",
 ) -> dict[str, Any]:
     if page < 1 or page_size < 1 or page_size > 100:
         raise ValueError("page must be positive and pageSize must be between 1 and 100")
-    if horizon is not None and horizon not in {5, 10, 20, 30}:
-        raise ValueError("horizon must be 5, 10, 20, or 30")
-    if source not in {"ALL", "CURRENT", "ALPHA158", "JQDATA"}:
+    if horizon is not None and horizon not in {5, 10, 20, 30, 63, 126}:
+        raise ValueError("horizon must be 5, 10, 20, 30, 63, or 126")
+    if source not in {"ALL", "CURRENT", "ALPHA158", "JQDATA", "BANK"}:
         raise ValueError("unknown factor source")
     if status not in {"ALL", "TESTED", "RAW_ONLY", "WITH_EXECUTION"}:
         raise ValueError("unknown asset status")
@@ -340,6 +340,7 @@ def query_factor_assets(
             "with_execution": sum(any(run["has_execution"] for run in runs) for runs in all_groups.values()),
             "runs": len(items),
             "current": sum(item[0]["source_collection"] == "CURRENT" for item in all_groups.values()),
+            "bank": sum(item[0]["source_collection"] == "BANK" for item in all_groups.values()),
             "alpha158": sum(item[0]["source_collection"] == "ALPHA158" for item in all_groups.values()),
             "jqdata": sum(item[0]["source_collection"] == "JQDATA" for item in all_groups.values()),
         },

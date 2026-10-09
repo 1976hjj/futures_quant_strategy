@@ -1,0 +1,10 @@
+{
+  "version": "1.0.0",
+  "original_fact_files": [
+    "data/features/bank_original_evidence/4f3d52e1c9e4bd03f824e3431714ca6edb26ad53a75309a5c38a61e8a16b95fc/qualified_financial_facts_final.parquet"
+  ],
+  "original_growth_files": [
+    "data/features/bank_original_evidence/87b9bc04bf3cdb7701092750a6c22cac57619a5a50d1c707040bcb4de8225779/original_same_report_profit_growth_facts.parquet"
+  ],
+  "note": "原始报告时点证据的冻结副本；仓库最新Token版本按保守可用时间优先；不改原始/PIT数据。"
+}

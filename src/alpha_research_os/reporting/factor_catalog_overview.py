@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from alpha_research_os.factors.alpha158 import FactorCategory, alpha158_catalog
+from alpha_research_os.factors.bank import bank_factor_catalog
 from alpha_research_os.factors.jqdata import jqdata_catalog
 from alpha_research_os.factors.library import m4_2_factor_entries
 
@@ -255,6 +256,19 @@ def build_factor_catalog_overview(project_root: Path) -> list[dict[str, Any]]:
                 **_dynamic_fields(published, result, alpha158=True),
             }
         )
+    for factor in bank_factor_catalog():
+        key = (factor.factor_id, factor.factor_version)
+        published = releases.get(key, [])
+        result = _result_for_current_release(published, evidence.get(key))
+        items.append({
+            "factor_id": factor.factor_id, "external_name": None, "factor_version": factor.factor_version,
+            "chinese_name": factor.chinese_name, "english_name": factor.factor_id,
+            "category": factor.category, "family": "bank-industry", "description": factor.description,
+            "formula": factor.formula, "required_fields": [factor.field], "source_collection": "BANK",
+            "source_label": "银行行业因子", "expected_direction": factor.expected_direction,
+            "research_scope": "银行范围；非银行不出值；历史版本认证未全部完成",
+            **_dynamic_fields(published, result, alpha158=False),
+        })
     return items
 
 
@@ -265,7 +279,7 @@ def query_factor_catalog(
     page_size: int = 36,
     query: str = "",
     category: str = "全部",
-    source: Literal["ALL", "CURRENT", "ALPHA158", "JQDATA"] = "ALL",
+    source: Literal["ALL", "CURRENT", "ALPHA158", "JQDATA", "BANK"] = "ALL",
     status: Literal[
         "ALL", "M4_COMPLETE", "CALCULATED", "CALCULATED_VERIFYING", "ACCURACY_FAILED", "NOT_CALCULATED"
     ] = "ALL",
@@ -310,6 +324,7 @@ def query_factor_catalog(
         "current": sum(item["source_collection"] == "CURRENT" for item in items),
         "alpha158": sum(item["source_collection"] == "ALPHA158" for item in items),
         "jqdata": sum(item["source_collection"] == "JQDATA" for item in items),
+        "bank": sum(item["source_collection"] == "BANK" for item in items),
     }
     categories = {"全部": len(facet_items)} | {
         name: sum(item["category"] == name for item in facet_items) for name in CATEGORY_ORDER
