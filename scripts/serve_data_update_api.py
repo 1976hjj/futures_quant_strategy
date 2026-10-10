@@ -9,7 +9,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import URLError
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen
 
 from pydantic import ValidationError
@@ -19,11 +19,19 @@ for import_root in (PROJECT_ROOT, PROJECT_ROOT / "src"):
     if str(import_root) not in sys.path:
         sys.path.insert(0, str(import_root))
 
+from scripts.bank_processing import (  # noqa: E402
+    ProcessingRequest,
+    processing_inventory,
+    processing_plan,
+    table_page,
+)
+from scripts.bank_processing_api import BankProcessingManager  # noqa: E402
 from scripts.data_update import DataUpdateRequest, inventory, plan  # noqa: E402
 from scripts.data_update_api import DataUpdateManager  # noqa: E402
 
 
 def make_handler(root: Path, manager: DataUpdateManager, origins: set[str], strategy_url: str):
+    processing = BankProcessingManager(root)
     class Handler(BaseHTTPRequestHandler):
         def reply(self, status: int, payload: object) -> None:
             body = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode()
@@ -36,7 +44,10 @@ def make_handler(root: Path, manager: DataUpdateManager, origins: set[str], stra
                 self.send_header("Access-Control-Allow-Origin", origin)
                 self.send_header("Vary", "Origin")
             self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+                pass  # Browser navigation can cancel an otherwise completed read.
 
         def do_OPTIONS(self) -> None:  # noqa: N802
             origin = self.headers.get("Origin")
@@ -56,6 +67,20 @@ def make_handler(root: Path, manager: DataUpdateManager, origins: set[str], stra
                     self.reply(HTTPStatus.OK, {"status": "ok", "service": "data-management"})
                 elif path == "/api/v1/data/inventory":
                     self.reply(HTTPStatus.OK, inventory(root))
+                elif path == "/api/v1/data/processing/inventory":
+                    self.reply(HTTPStatus.OK, processing_inventory(root))
+                elif path == "/api/v1/data/processing/jobs/latest":
+                    self.reply(HTTPStatus.OK, {"job": processing.latest()})
+                elif path.startswith("/api/v1/data/processing/jobs/"):
+                    self.reply(HTTPStatus.OK, processing.status(path.rsplit("/", 1)[-1]))
+                elif path in ("/api/v1/data/processing/gaps", "/api/v1/data/processing/values"):
+                    query = parse_qs(urlparse(self.path).query)
+                    def get(key, default=None):
+                        return query.get(key, [default])[0]
+                    self.reply(HTTPStatus.OK, table_page(
+                        root, "DERIVED" if path.endswith("gaps") else "INDICATORS", get("asset_id"),
+                        int(get("page", "1")), int(get("page_size", "20")), get("factor_id"), get("field"),
+                    ))
                 elif path == "/api/v1/data/jobs/latest":
                     self.reply(HTTPStatus.OK, {"job": manager.latest()})
                 elif path.startswith("/api/v1/data/jobs/"):
@@ -83,6 +108,8 @@ def make_handler(root: Path, manager: DataUpdateManager, origins: set[str], stra
                 if path == "/api/v1/data/plan":
                     self.reply(HTTPStatus.OK, plan(root, DataUpdateRequest.model_validate(payload)))
                 elif path == "/api/v1/data/jobs":
+                    if processing.running():
+                        raise RuntimeError("数据处理正在运行，请完成后再更新来源数据")
                     # The existing backtest API keeps its active process and queue.
                     # Its DataUpdateManager also checks these shared durable job files.
                     try:
@@ -95,6 +122,10 @@ def make_handler(root: Path, manager: DataUpdateManager, origins: set[str], stra
                     if queue.get("running_count") or queue.get("queued_count"):
                         raise RuntimeError("strategy backtests are running or queued; wait before updating data")
                     self.reply(HTTPStatus.ACCEPTED, manager.start(payload))
+                elif path == "/api/v1/data/processing/plan":
+                    self.reply(HTTPStatus.OK, processing_plan(root, ProcessingRequest.model_validate(payload)))
+                elif path == "/api/v1/data/processing/jobs":
+                    self.reply(HTTPStatus.ACCEPTED, processing.start(payload))
                 else:
                     self.reply(HTTPStatus.NOT_FOUND, {"error": "NOT_FOUND"})
             except (ValueError, ValidationError) as error:

@@ -1,5 +1,7 @@
 # Alpha Research OS 实施计划
 
+运行入口更新：当前业务前端位于 `E:\codex\Agent\quant_stock_strategy_system\frontEnd`，完整服务由根目录 `run.ps1` 启动。下文保留各阶段历史记录，旧 `frontEnd/` 首版源码可从 Git 历史恢复。银行当前操作见 `docs/bank_factor_computation.md`。
+
 状态：Active implementation — M2-E extended-data backfill + M4.5 redundancy/incremental evidence completed
 项目范围：A 股、日频、横截面因子研究  
 最后更新：2026-09-04

@@ -25,7 +25,8 @@ from alpha_research_os.factors.assets import (  # noqa: E402
 )
 from alpha_research_os.factors.bank import ENGINE_VERSION, bank_catalog, bank_factor_catalog  # noqa: E402
 from alpha_research_os.kernel.canonical import canonical_json_bytes, content_hash  # noqa: E402
-from scripts.bank_factor_inputs import build_features, source_inputs  # noqa: E402
+from scripts.bank_factor_inputs import build_features, daily_pb_inputs, eligible_bank_market  # noqa: E402
+from scripts.bank_factor_workflow import dependency_task, prepare_stock_inputs, workflow_progress  # noqa: E402
 from scripts.publish_factor_release import (  # noqa: E402
     _atomic_write,
     _lineage,
@@ -36,8 +37,56 @@ from scripts.publish_factor_release import (  # noqa: E402
 )
 
 
-def prepare_inputs(root: Path, start: date, end: date):
-    facts, events, market, membership, capitals, coverage = source_inputs(root, start, end)
+def prepare_pb_inputs(root: Path, start: date, end: date):
+    """Independent bank PB input asset; no financial/PDF preparation required."""
+    settings = json.loads((root / "config/bank_timing_data.json").read_bytes())
+    history = daily_pb_inputs(root, date.fromisoformat(settings["pb_history_start"]), end)
+    with duckdb.connect(str(root / "data/warehouse/alpha_research.duckdb"), read_only=True) as connection:
+        market = eligible_bank_market(connection, start, end)
+        membership = connection.execute("""SELECT * FROM research.sw_industry_membership WHERE l1_name='银行'
+            ORDER BY ts_code,in_date,out_date,source_snapshot_id""").df()
+    market["session"] = pd.to_datetime(market.session).dt.date
+    features = market.merge(history.drop(columns="close"), on=["session", "instrument_id"],
+                            how="left", validate="one_to_one")
+    features["available_at"] = pd.to_datetime(features.session.astype(str), utc=True) + pd.Timedelta(hours=9)
+    frames = dict(bank_market=market, membership=membership, features=features, bank_pb_history=history)
+    hashes = {name: content_hash(frame.to_json(orient="split", date_format="iso", default_handler=str))
+              for name, frame in frames.items()}
+    hashes["engine"] = content_hash({name: _sha256_file(root / "scripts" / name)
+                                     for name in ("publish_bank_factor.py", "bank_factor_inputs.py")})
+    identity = content_hash(hashes)
+    folder = root / "data/factor_store/bank_inputs" / identity.removeprefix("sha256:")
+    manifest_path = folder / "input_manifest.json"
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_bytes())
+        for name, digest in manifest["files"].items():
+            if _sha256_file(folder / name) != digest:
+                raise ValueError("银行PB输入版本完整性失败")
+        return folder, manifest
+    if market.empty:
+        raise ValueError("所选范围没有历史可选银行")
+    folder.mkdir(parents=True, exist_ok=True)
+    for name, frame in frames.items():
+        frame.to_parquet(folder / (name + ".parquet"), index=False)
+    manifest = dict(input_key=identity, standard_pack_id=None, source_hashes=hashes,
+                    files={path.name: _sha256_file(path) for path in folder.glob("*.parquet")},
+                    start=str(start), end=str(end), bank_count=int(market.instrument_id.nunique()),
+                    row_count=len(market), scope="historically eligible SW bank sessions",
+                    historical_status="RESEARCH_ONLY; archived daily PB; vendor revision certification incomplete")
+    _atomic_write(manifest_path, canonical_json_bytes(manifest))
+    return folder, manifest
+
+
+def prepare_inputs(root: Path, start: date, end: date, source_mode="warehouse"):
+    with dependency_task(root):
+        source_folder, standard = prepare_stock_inputs(root, start, end, source_mode)
+    facts = pd.read_parquet(source_folder / "facts.parquet")
+    events = pd.read_parquet(source_folder / "dividend_events.parquet")
+    market = pd.read_parquet(source_folder / "bank_market.parquet")
+    market = market[(market.session >= start) & (market.session <= end)].reset_index(drop=True)
+    membership = pd.read_parquet(source_folder / "membership.parquet")
+    capitals = pd.read_parquet(source_folder / "capital_reference_prices.parquet")
+    coverage = set(standard["dividend_coverage"])
     frames = {
         "facts": facts,
         "dividend_events": events,
@@ -50,6 +99,7 @@ def prepare_inputs(root: Path, start: date, end: date):
         for name, frame in frames.items()
     }
     hashes["dividend_coverage"] = content_hash(sorted(coverage))
+    hashes["standard_pack"] = standard["asset_id"]
     hashes["engine_source"] = content_hash(
         {
             path.name: _sha256_file(path)
@@ -71,12 +121,14 @@ def prepare_inputs(root: Path, start: date, end: date):
     folder.mkdir(parents=True, exist_ok=True)
     for name, frame in frames.items():
         frame.to_parquet(folder / f"{name}.parquet", index=False)
-    features = build_features(facts, events, market, capitals, coverage)
+    features = pd.read_parquet(source_folder / "features.parquet")
+    features = features[(features.session >= start) & (features.session <= end)].reset_index(drop=True)
     if features.empty:
         raise ValueError("no eligible historical bank sessions in selected window")
     features.to_parquet(folder / "features.parquet", index=False)
     manifest = {
         "input_key": key,
+        "standard_pack_id": standard["asset_id"],
         "source_hashes": hashes,
         "files": {p.name: _sha256_file(p) for p in folder.glob("*.parquet")},
         "bank_count": int(market.instrument_id.nunique()),
@@ -109,7 +161,7 @@ def materialization_sql(item, spec, request, input_folder: Path, target: Path):
       ORDER BY session,instrument_id) TO '{_sql_path(target)}' (FORMAT PARQUET, COMPRESSION ZSTD)"""
 
 
-def verify_bank_values(folder: Path, target: Path, field: str):
+def verify_bank_values(folder: Path, target: Path, field: str, root=PROJECT_ROOT):
     """Exact masked keys plus fresh serial first/last-session witnesses per bank/year."""
     actual = pd.read_parquet(target)
     market = pd.read_parquet(folder / "bank_market.parquet")
@@ -118,6 +170,21 @@ def verify_bank_values(folder: Path, target: Path, field: str):
         map(tuple, market[keys].itertuples(index=False, name=None))
     ):
         raise ValueError("bank factor differs from eligible bank keys")
+    if field == "pb_daily":
+        with duckdb.connect(str(root / "data/warehouse/alpha_research.duckdb"), read_only=True) as connection:
+            expected = connection.execute("""SELECT trade_date AS session,ts_code AS instrument_id,
+                CASE WHEN pb>0 AND isfinite(pb) THEN pb END AS expected FROM research.daily_basic
+                WHERE trade_date BETWEEN ? AND ? AND ts_code IN
+                (SELECT DISTINCT ts_code FROM research.sw_industry_membership WHERE l1_name='银行')""",
+                                          [market.session.min(), market.session.max()]).df()
+        expected["session"] = pd.to_datetime(expected.session).dt.date
+        paired = actual.merge(expected, on=keys, how="left", validate="one_to_one")
+        if not paired.value.isna().equals(paired.expected.isna()) or (
+                (paired.value - paired.expected).abs() > 1e-12).any():
+            raise ValueError("银行PB与原始日估值表不一致")
+        return {"status": "PASS", "scope": "all bank keys and values versus archived daily PB; not PIT certification",
+                "expected_key_count": len(market), "serial_reference_sample_count": len(paired),
+                "serial_reference_value_difference_count": 0, "serial_reference_missing_difference_count": 0}
     market["year"] = market.session.map(lambda d: d.year)
     grouped = market.groupby(["instrument_id", "year"], sort=True)
     witnesses = pd.concat([grouped.head(1), grouped.tail(1)]).drop_duplicates(keys).drop(columns="year")
@@ -145,7 +212,7 @@ def verify_bank_values(folder: Path, target: Path, field: str):
     }
 
 
-def publish(root: Path, start: date, end: date, factor_id: str):
+def publish(root: Path, start: date, end: date, factor_id: str, source_mode="warehouse"):
     if end < start:
         raise ValueError("end must not precede start")
     catalog = bank_catalog(factor_id)
@@ -157,7 +224,12 @@ def publish(root: Path, start: date, end: date, factor_id: str):
         if start < lower or end > upper:
             raise ValueError(f"window outside market coverage {lower}..{upper}")
         lineage = list(_lineage(c))
-    folder, inputs = prepare_inputs(root, start, end)
+    if item.field == "pb_daily":
+        with dependency_task(root):
+            folder, inputs = prepare_pb_inputs(root, start, end)
+    else:
+        folder, inputs = prepare_inputs(root, start, end, source_mode)
+    workflow_progress("计算并复核银行个股因子", 75)
     lineage.append(DatasetLineage(manifest_table="bank-feature-inputs-v1", checkpoint_hashes=(inputs["input_key"],)))
     request = FactorAssetRequest(
         engine_version=ENGINE_VERSION,
@@ -205,7 +277,7 @@ def publish(root: Path, start: date, end: date, factor_id: str):
         if keys or row_count != inputs["row_count"]:
             raise ValueError("bank factor universe-key verification failed")
     quality, details = _quality(target, 1)
-    verification = verify_bank_values(folder, target, item.field)
+    verification = verify_bank_values(folder, target, item.field, root)
     target.replace(parquet)
     quality["accuracy_gate"] = verification
     _atomic_write(release / "accuracy_verification.json", canonical_json_bytes(verification))
@@ -229,8 +301,11 @@ def publish(root: Path, start: date, end: date, factor_id: str):
         release / "calculation_summary.json",
         canonical_json_bytes(
             {
-                "mode": "FULL_IMMUTABLE_BANK_INPUT",
-                "message": "银行范围按已公开字段计算；缺失保留，来源证据另存。",
+                "mode": "DAILY_PB_INPUT" if item.field == "pb_daily" else "FULL_IMMUTABLE_BANK_INPUT",
+                "message": ("已复用既有日PB，并逐值核对归档；与普通股账面市值比口径分别保存。"
+                            if item.field == "pb_daily"
+                            else "已自动准备标准事实及个股派生输入；缺失保留，来源证据另存。"),
+                "standard_pack_id": inputs["standard_pack_id"],
                 "input_folder": str(folder),
                 "bank_scope": inputs["scope"],
                 "historical_status": inputs["historical_status"],
@@ -256,8 +331,9 @@ def main():
     parser.add_argument("--start", required=True, type=date.fromisoformat)
     parser.add_argument("--end", required=True, type=date.fromisoformat)
     parser.add_argument("--result", type=Path)
+    parser.add_argument("--source-mode", choices=("warehouse", "frozen"), default="warehouse")
     args = parser.parse_args()
-    result = publish(PROJECT_ROOT, args.start, args.end, args.factor_id)
+    result = publish(PROJECT_ROOT, args.start, args.end, args.factor_id, args.source_mode)
     if args.result:
         _atomic_write(args.result, canonical_json_bytes(result))
     print(json.dumps(result, ensure_ascii=False, indent=2))

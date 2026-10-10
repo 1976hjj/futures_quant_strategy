@@ -19,9 +19,10 @@ for root in (PROJECT_ROOT, SRC_ROOT):
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
 
+from alpha_research_os.factors.bank_timing import is_bank_timing_indicator  # noqa: E402
 from scripts.factor_compute_runtime import accuracy_status  # noqa: E402
-from scripts.serve_m4_control_api import M4RunRequest, build_pipeline_config  # noqa: E402
 from scripts.publish_factor_cohort import publish_cohort  # noqa: E402
+from scripts.serve_m4_control_api import M4RunRequest, build_pipeline_config  # noqa: E402
 
 
 def _write(path: Path, value: dict[str, Any]) -> None:
@@ -39,6 +40,8 @@ def _job_id() -> str:
 def _publisher(factor_id: str) -> tuple[str, list[str]]:
     from alpha_research_os.factors.library import m4_2_factor_entries
 
+    if is_bank_timing_indicator(factor_id):
+        return "scripts/publish_bank_sector_factor.py", []
     if factor_id.startswith("bank-"):
         return "scripts/publish_bank_factor.py", []
     current = {item.spec.factor_id for item in m4_2_factor_entries()}
@@ -52,8 +55,10 @@ def _publisher(factor_id: str) -> tuple[str, list[str]]:
 def _run(command: list[str], log_path: Path) -> tuple[bool, str]:
     environment = os.environ.copy()
     environment["PYTHONPATH"] = os.pathsep.join((str(SRC_ROOT), str(PROJECT_ROOT)))
+    environment["PYTHONIOENCODING"] = "utf-8"
     with log_path.open("wb") as stream:
-        completed = subprocess.run(command, cwd=PROJECT_ROOT, env=environment, stdout=stream, stderr=subprocess.STDOUT, check=False)
+        completed = subprocess.run(command, cwd=PROJECT_ROOT, env=environment, stdout=stream,
+                                   stderr=subprocess.STDOUT, check=False)
     tail = log_path.read_bytes()[-3000:].decode("utf-8", errors="replace")
     return completed.returncode == 0, tail
 
@@ -116,7 +121,8 @@ def run_batch(request_path: Path) -> dict[str, Any]:
         if reused and not reused.get("m4_retry"):
             item.update(status="PASS", phase="已复用前次完成结果",
                         release_id=reused["release_id"], m4_job_id=reused.get("m4_job_id"))
-            successful.append((selected, reused["release_id"]))
+            if not is_bank_timing_indicator(item["factor_id"]):
+                successful.append((selected, reused["release_id"]))
             _write(state_path, state)
             continue
         if reused and reused.get("m4_retry"):
@@ -131,6 +137,8 @@ def run_batch(request_path: Path) -> dict[str, Any]:
             command = [sys.executable, publisher, "--factor-id", item["factor_id"],
                        "--start", request["start"], "--end", request["end"],
                        "--result", str(result_path), *extra]
+            if item["factor_id"].startswith("bank-"):
+                command.extend(("--source-mode", request.get("bank_source_mode", "warehouse")))
             ok, tail = _run(command, root / f"{batch_id}.{index}.factor.log")
             if not ok or not result_path.exists():
                 item.update(status="FAIL", phase="因子计算失败", error=tail[-1000:] or "计算进程未返回结果")
@@ -144,6 +152,12 @@ def run_batch(request_path: Path) -> dict[str, Any]:
             # when this run originated from an older catalog selection.
             if result.get("factor_version"):
                 item["factor_version"] = result["factor_version"]
+            if is_bank_timing_indicator(item["factor_id"]):
+                item.update(status="PASS", phase=result["calculation"]["message"],
+                            observation_level="SECTOR", summary=result["summary"],
+                            data_warnings=result.get("data_warnings", []))
+                _write(state_path, state)
+                continue  # Date-level outputs never enter stock M4 or stock cohorts.
             release_dir = PROJECT_ROOT / "data/factor_store/releases" / release_id.removeprefix("sha256:")
             verification = accuracy_status(release_dir)
             if verification.get("status") == "PENDING":
@@ -215,8 +229,10 @@ def run_batch(request_path: Path) -> dict[str, Any]:
                 state["error"] = str(error)
             _write(state_path, state)
     failures = any(item["status"] == "FAIL" for item in items) or state["cohort_status"] in {"FAIL", "SKIPPED"}
-    state["status"] = "PARTIAL" if failures and any(item["status"] == "PASS" for item in items) else "FAIL" if failures else "PASS"
-    state["phase"] = "批次完成" if state["status"] == "PASS" else "部分完成" if state["status"] == "PARTIAL" else "批次失败"
+    state["status"] = ("PARTIAL" if failures and any(item["status"] == "PASS" for item in items)
+                       else "FAIL" if failures else "PASS")
+    state["phase"] = ("批次完成" if state["status"] == "PASS"
+                      else "部分完成" if state["status"] == "PARTIAL" else "批次失败")
     state["completed_at"] = datetime.now().astimezone().isoformat()
     _write(state_path, state)
     return state

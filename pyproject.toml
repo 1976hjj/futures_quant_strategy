@@ -26,6 +26,10 @@ data-tushare = [
 data-jqdata = [
   "jqdatasdk>=1.9,<2",
 ]
+data-bank-evidence = [
+  "pypdfium2>=4,<6",
+  "rapidocr-onnxruntime==1.2.3",
+]
 dev = [
   "hypothesis>=6.125",
   "pytest>=8.3",

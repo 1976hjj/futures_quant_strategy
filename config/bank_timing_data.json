@@ -1,0 +1,28 @@
+{
+  "version": "1.0.0",
+  "released_feature_end": "2025-12-31",
+  "start": "2020-01-02",
+  "market_warmup_start": "2019-01-01",
+  "feature_warmup_start": "2016-01-01",
+  "pb_source": "research.daily_basic",
+  "pb_history_start": "2016-01-01",
+  "frozen_bank_input": "data/factor_store/bank_inputs/d5590f6952b8a34075113c38567b3e56ae30ffa8895ae05172a683c8da0511e5",
+  "historical_grade": "RESEARCH_ONLY; source cohort and disclosure-version certification incomplete",
+  "minimum_valid_banks": 10,
+  "minimum_coverage": 0.70,
+  "history_sessions": 756,
+  "minimum_history_sessions": 504,
+  "trend_sessions": 120,
+  "relative_strength_sessions": 63,
+  "bank_basket": {
+    "weighting": "equal",
+    "universe_lag_sessions": 2,
+    "missing_held_return": "invalidate_day_and_restart_segment",
+    "use": "analytical gross total-return reference; not an executable strategy"
+  },
+  "benchmark": {
+    "index_code": "H00300",
+    "return_basis": "gross_total_return_index",
+    "primary_definition": "https://oss-ch.csindex.com.cn/static/html/csindex/public/uploads/indices/detail/files/zh_CN/000300factsheet.pdf"
+  }
+}

@@ -16,7 +16,7 @@ from datetime import date, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import parse_qs, urlparse
 
 import duckdb
@@ -30,6 +30,7 @@ for import_root in (PROJECT_ROOT, SRC_ROOT):
 
 from alpha_research_os.factors.alpha158 import alpha158_catalog  # noqa: E402
 from alpha_research_os.factors.bank import bank_factor_catalog  # noqa: E402
+from alpha_research_os.factors.bank_timing import bank_timing_catalog, is_bank_timing_indicator  # noqa: E402
 from alpha_research_os.factors.jqdata import jqdata_catalog  # noqa: E402
 from alpha_research_os.factors.library import m4_2_factor_entries  # noqa: E402
 from alpha_research_os.kernel.canonical import canonical_json_bytes, content_hash  # noqa: E402
@@ -40,6 +41,9 @@ from alpha_research_os.reporting import (  # noqa: E402
     query_factor_assets,
     query_factor_catalog,
 )
+from scripts.bank_factor_inputs import daily_pb_inputs  # noqa: E402
+from scripts.bank_factor_workflow import dependency_preflight, latest_workflow_progress  # noqa: E402
+from scripts.bank_processing import table_page  # noqa: E402
 from scripts.factor_compute_runtime import accuracy_status  # noqa: E402
 
 STAGE_LABELS = {
@@ -136,12 +140,14 @@ class FactorComputeRequest(BaseModel):
     factor_version: str
     start: date
     end: date
+    bank_source_mode: Literal["warehouse", "frozen"] = "warehouse"
 
     @model_validator(mode="after")
     def valid_scope(self) -> FactorComputeRequest:
         if self.end < self.start:
             raise ValueError("end must not precede start")
-        catalog = {item.factor_id: item for item in (*alpha158_catalog(), *jqdata_catalog(), *bank_factor_catalog())}
+        catalog = {item.factor_id: item for item in (*alpha158_catalog(), *jqdata_catalog(),
+                                                     *bank_factor_catalog(), *bank_timing_catalog())}
         catalog.update({item.spec.factor_id: item.spec for item in m4_2_factor_entries()})
         item = catalog.get(self.factor_id)
         if item is None:
@@ -155,6 +161,7 @@ class FactorBatchRequest(BaseModel):
     factors: tuple[dict[str, str], ...] = Field(min_length=1, max_length=512)
     start: date
     end: date
+    bank_source_mode: Literal["warehouse", "frozen"] = "warehouse"
     stages: tuple[str, ...] = ()
     holding_sessions: int = 5
     quantile_count: int = Field(default=5, ge=2, le=20)
@@ -176,7 +183,8 @@ class FactorBatchRequest(BaseModel):
             raise ValueError("end must not precede start")
         if len({item.get("factor_id") for item in self.factors}) != len(self.factors):
             raise ValueError("batch factors must be unique")
-        catalog = {item.factor_id: item for item in (*alpha158_catalog(), *jqdata_catalog(), *bank_factor_catalog())}
+        catalog = {item.factor_id: item for item in (*alpha158_catalog(), *jqdata_catalog(),
+                                                     *bank_factor_catalog(), *bank_timing_catalog())}
         catalog.update({item.spec.factor_id: item.spec for item in m4_2_factor_entries()})
         for item in self.factors:
             known = catalog.get(item.get("factor_id"))
@@ -186,8 +194,11 @@ class FactorBatchRequest(BaseModel):
             raise ValueError("unsupported or duplicate M4 stages")
         if self.holding_sessions not in {5, 10, 20, 30, 63, 126}:
             raise ValueError("holding_sessions must be 5, 10, 20, 30, 63, or 126")
-        if "m4_5" in self.stages and len(self.factors) < 2:
-            raise ValueError("M4.5 needs at least two selected factors")
+        stock_count = sum(not is_bank_timing_indicator(item["factor_id"]) for item in self.factors)
+        if self.stages and not stock_count:
+            raise ValueError("板块因子支持计算及数据检验，不支持个股横截面 M4，请取消 M4 阶段")
+        if "m4_5" in self.stages and stock_count < 2:
+            raise ValueError("M4.5 needs at least two selected stock factors")
         return self
 
 
@@ -530,6 +541,10 @@ class FactorJobManager:
 
     def start(self, payload: dict[str, Any]) -> dict[str, Any]:
         request = FactorComputeRequest.model_validate(payload)
+        if request.factor_id == "bank-pb-daily":
+            daily_pb_inputs(self.project_root, request.start, request.end)
+        elif request.factor_id.startswith("bank-"):
+            dependency_preflight(self.project_root, request.start, request.end, request.bank_source_mode)
         jqdata_account_factors: set[str] = set()
         if request.factor_id in jqdata_account_factors and (
             not os.environ.get("JQDATA_USERNAME", "").strip() or not os.environ.get("JQDATA_PASSWORD", "")
@@ -556,8 +571,10 @@ class FactorJobManager:
             environment = os.environ.copy()
             environment["PYTHONPATH"] = os.pathsep.join((str(SRC_ROOT), str(PROJECT_ROOT)))
             current_factor_ids = {item.spec.factor_id for item in m4_2_factor_entries()}
+            environment["PYTHONIOENCODING"] = "utf-8"
             publisher = (
-                "scripts/publish_bank_factor.py" if request.factor_id.startswith("bank-")
+                "scripts/publish_bank_sector_factor.py" if is_bank_timing_indicator(request.factor_id)
+                else "scripts/publish_bank_factor.py" if request.factor_id.startswith("bank-")
                 else "scripts/publish_factor_release.py" if request.factor_id in current_factor_ids
                 else "scripts/publish_jqdata_factor.py" if request.factor_id.startswith("jqdata-")
                 else "scripts/publish_alpha158_factor.py"
@@ -571,6 +588,8 @@ class FactorJobManager:
             ]
             if request.factor_id in current_factor_ids:
                 command.extend(("--catalog-profile", "m4.2"))
+            if request.factor_id.startswith("bank-"):
+                command.extend(("--source-mode", request.bank_source_mode))
             self.process = subprocess.Popen(
                 command,
                 cwd=self.project_root,
@@ -663,6 +682,10 @@ class FactorJobManager:
             )
         else:
             phase, progress, message = "准备任务", 3, "任务已接收，正在启动计算进程。"
+        dependency_progress = latest_workflow_progress(log_tail) if status == "RUNNING" else None
+        if dependency_progress:
+            phase, progress = dependency_progress["phase"], dependency_progress["progress"]
+            message = phase + "；输入缺口保留原因，数据错误会终止计算。"
         return {
             "job_id": job_id,
             "status": status,
@@ -742,7 +765,8 @@ def _batch_m4_steps(project_root: Path, job_id: str | None, log_path: Path) -> d
               "status": "PASS" if stage in completed else "RUNNING" if stage == current else "WAITING"}
              for stage in stages]
     started = report.get("current_stage_started_at")
-    elapsed = max(0, int((datetime.now().astimezone() - datetime.fromisoformat(started)).total_seconds())) if started else None
+    elapsed = (max(0, int((datetime.now().astimezone() - datetime.fromisoformat(started)).total_seconds()))
+               if started else None)
     return {"completed": len(completed), "total": len(stages),
             "current": current, "current_label": _BATCH_STAGE_NAMES.get(current, current) if current else None,
             "detail": _batch_log_detail(log_path), "elapsed_seconds": elapsed,
@@ -763,6 +787,12 @@ class FactorBatchManager:
 
     def preflight(self, payload: dict[str, Any]) -> dict[str, Any]:
         request = FactorBatchRequest.model_validate(payload)
+        bank_plan = None
+        if any(item["factor_id"].startswith("bank-") and item["factor_id"] != "bank-pb-daily"
+               for item in request.factors):
+            bank_plan = dependency_preflight(self.project_root, request.start, request.end, request.bank_source_mode)
+        elif any(item["factor_id"] == "bank-pb-daily" for item in request.factors):
+            daily_pb_inputs(self.project_root, request.start, request.end)
         database = self.project_root / "data/warehouse/alpha_research.duckdb"
         with duckdb.connect(str(database), read_only=True) as connection:
             lower, upper = connection.execute(
@@ -772,18 +802,30 @@ class FactorBatchManager:
             raise ValueError(f"计算日期必须在原始数据覆盖范围 {lower} 至 {upper} 内")
         catalog = {item["factor_id"]: item for item in build_factor_catalog_overview(self.project_root)}
         items = []
+        input_warnings = []
         for factor in request.factors:
             entry = catalog[factor["factor_id"]]
             coverage = entry.get("coverage") or {}
+            indicator = (entry.get("data_readiness") or {}).get("indicator")
+            if indicator and not indicator["latest_ready"]:
+                input_warnings.append(f"{entry['chinese_name']}：现有输入版本最新日覆盖不足"
+                                      f"（{indicator['latest_coverage']:.1%}），运行时将重新核验并保留缺失原因。")
+            covered = (coverage.get("start", "9999") <= request.start.isoformat()
+                       and coverage.get("end", "0000") >= request.end.isoformat())
             items.append({
                 "factor_id": factor["factor_id"], "name": entry["chinese_name"],
-                "coverage": coverage, "action": "已覆盖，可复用" if coverage.get("start", "9999") <= request.start.isoformat()
-                and coverage.get("end", "0000") >= request.end.isoformat() else "计算或补齐",
+                "coverage": coverage, "action": "已覆盖，可复用" if covered else "计算或补齐",
             })
         resolved = _batch_stage_closure(request.stages)
-        entities = len(items) * (1 + (len(request.processed_variants) if "m4_2" in resolved else 0))
+        stock_count = sum(not is_bank_timing_indicator(item["factor_id"]) for item in request.factors)
+        entities = stock_count * (1 + (len(request.processed_variants) if "m4_2" in resolved else 0))
         pairs = entities * (entities - 1) // 2 if "m4_5" in resolved else 0
         warnings = ["M4.5 将对本批次通过前置检验的因子共同运行。"] if pairs else []
+        warnings.extend(input_warnings)
+        if bank_plan:
+            warnings.append("银行因子自动核验标准事实、准备派生输入；相同版本复用，缺失按逐日覆盖记录。")
+        if any(is_bank_timing_indicator(item["factor_id"]) for item in request.factors):
+            warnings.append("板块因子按交易日计算；本批 M4 仅用于所选个股因子。")
         if pairs > 10_000:
             warnings.append(f"M4.5 约需比较 {pairs:,} 对因子版本，预计耗时较长；建议缩小本批选择范围。")
         return {
@@ -793,6 +835,7 @@ class FactorBatchManager:
             "added_stages": [stage for stage in resolved if stage not in request.stages],
             "estimated_pair_correlations": pairs,
             "warnings": warnings,
+            "bank_dependencies": bank_plan,
         }
 
     def start(self, payload: dict[str, Any], reuse_items: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -812,6 +855,7 @@ class FactorBatchManager:
             log_stream = (self.run_root / f"{job_id}.log").open("wb")
             environment = os.environ.copy()
             environment["PYTHONPATH"] = os.pathsep.join((str(SRC_ROOT), str(PROJECT_ROOT)))
+            environment["PYTHONIOENCODING"] = "utf-8"
             self.process = subprocess.Popen(
                 [sys.executable, "scripts/run_factor_batch.py", "--request", str(request_path)],
                 cwd=self.project_root, env=environment, stdout=log_stream, stderr=subprocess.STDOUT,
@@ -847,35 +891,43 @@ class FactorBatchManager:
             self.project_root, state.get("cohort_job_id"), self.run_root / f"{job_id}.cohort.log"
         ) if has_cohort else None
         cohort_total = (1 + (cohort_pipeline["total"] if cohort_pipeline else 7)) if has_cohort else 0
-        total_steps = len(state["items"]) * factor_total + cohort_total
+        total_steps = sum(1 if is_bank_timing_indicator(item["factor_id"]) else factor_total
+                          for item in state["items"]) + cohort_total
         completed_steps = 0
         progress_units = 0.0
         activity: dict[str, Any] | None = None
         total_years = date.fromisoformat(request["end"]).year - date.fromisoformat(request["start"]).year + 1
         for index, item in enumerate(state["items"]):
+            item_total = 1 if is_bank_timing_indicator(item["factor_id"]) else factor_total
             pipeline = _batch_m4_steps(
                 self.project_root, item.get("m4_job_id"), self.run_root / f"{job_id}.{index}.m4.log"
             )
             item["stage_progress"] = pipeline
             if item["status"] in {"PASS", "FAIL"}:
-                units = float(factor_total)
-                whole = factor_total
+                units = float(item_total)
+                whole = item_total
             elif item.get("release_id"):
                 whole = 1 + (pipeline["completed"] if pipeline else 0)
                 units = float(whole)
             elif item["status"] == "RUNNING":
                 factor_log = self.run_root / f"{job_id}.{index}.factor.log"
-                tail = factor_log.read_bytes()[-32_000:].decode("utf-8", errors="replace") if factor_log.exists() else ""
+                tail = (factor_log.read_bytes()[-32_000:].decode("utf-8", errors="replace")
+                        if factor_log.exists() else "")
                 finished_years = len(set(re.findall(r"year=(\d{4}) completed", tail)))
                 whole = 0
                 units = min(0.95, finished_years / total_years)
                 item["factor_years"] = {"completed": finished_years, "total": total_years}
+                dependency_progress = latest_workflow_progress(tail)
+                if dependency_progress:
+                    item["phase"] = dependency_progress["phase"]
+                    units = min(.95, dependency_progress["progress"] / 100)
+                    item.pop("factor_years", None)
             else:
                 whole = 0
                 units = 0.0
             completed_steps += whole
             progress_units += units
-            item["progress"] = round(100 * units / factor_total)
+            item["progress"] = round(100 * units / item_total)
             if item is current:
                 detail = pipeline["detail"] if pipeline else _batch_log_detail(
                     self.run_root / f"{job_id}.{index}.factor.log"
@@ -887,7 +939,8 @@ class FactorBatchManager:
             if state.get("cohort_status") in {"PASS", "FAIL", "SKIPPED"}:
                 cohort_whole = cohort_total
             elif state.get("cohort_status") == "RUNNING":
-                cohort_whole = (1 + (cohort_pipeline["completed"] if cohort_pipeline else 0)) if state.get("cohort_job_id") else 0
+                cohort_whole = ((1 + (cohort_pipeline["completed"] if cohort_pipeline else 0))
+                                if state.get("cohort_job_id") else 0)
                 activity = {"title": "本批联合 M4.5",
                             "stage": cohort_pipeline["current_label"] if cohort_pipeline else "合并因子数据",
                             "detail": cohort_pipeline["detail"] if cohort_pipeline else None,
@@ -975,6 +1028,17 @@ def make_handler(
             if path == "/api/v1/health":
                 self._json(HTTPStatus.OK, {"status": "ok", "service": "alpha-research-os-m4-control"})
                 return
+            if path == "/api/v1/factors/sector-values":
+                query = parse_qs(parsed.query)
+                try:
+                    result = table_page(project_root, "INDICATORS", query.get("release_id", [None])[0],
+                                        page=int(query.get("page", ["1"])[0]),
+                                        page_size=int(query.get("pageSize", ["20"])[0]),
+                                        factor_id=query.get("factor_id", [None])[0])
+                    self._json(HTTPStatus.OK, result)
+                except (ValueError, KeyError, OSError) as error:
+                    self._json(HTTPStatus.BAD_REQUEST, {"detail": str(error)})
+                return
             if path == "/api/v1/m4/options":
                 self._json(
                     HTTPStatus.OK,
@@ -1007,8 +1071,11 @@ def make_handler(
                     lower, upper = connection.execute(
                         "SELECT min(trade_date), max(trade_date) FROM research.market_daily"
                     ).fetchone()
+                bank_bounds = json.loads((project_root / "config/bank_timing_data.json").read_bytes())
                 self._json(HTTPStatus.OK, {"start": lower.isoformat() if lower else None,
-                                           "end": upper.isoformat() if upper else None})
+                                           "end": upper.isoformat() if upper else None,
+                                           "bank_start": bank_bounds["start"],
+                                           "bank_end": bank_bounds["released_feature_end"]})
                 return
             parts = path.strip("/").split("/")
             if len(parts) == 5 and parts[:4] == ["api", "v1", "factors", "batches"]:
@@ -1131,7 +1198,7 @@ def make_handler(
                 status = first("status", "ALL").upper()
                 sort_by = first("sortBy", "category")
                 sort_order = first("sortOrder", "asc").lower()
-                if source not in {"ALL", "CURRENT", "ALPHA158", "JQDATA", "BANK"}:
+                if source not in {"ALL", "CURRENT", "ALPHA158", "JQDATA", "BANK", "BANK_TIMING"}:
                     raise ValueError("unknown factor source")
                 if status not in {
                     "ALL", "M4_COMPLETE", "CALCULATED", "CALCULATED_VERIFYING",
@@ -1272,7 +1339,8 @@ def main() -> int:
     manager = JobManager(root)
     factor_manager = FactorJobManager(root)
     batch_manager = FactorBatchManager(root)
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(root, origins, manager, factor_manager, batch_manager))
+    server = ThreadingHTTPServer((args.host, args.port),
+                                 make_handler(root, origins, manager, factor_manager, batch_manager))
     print(f"M4 control API: http://{args.host}:{args.port}", flush=True)
     server.serve_forever()
     return 0

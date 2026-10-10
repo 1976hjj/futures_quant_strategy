@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 BATCH = '20261009-171149-5e2cf6'
 PACK = ROOT / 'data/factor_store/bank_inputs/d5590f6952b8a34075113c38567b3e56ae30ffa8895ae05172a683c8da0511e5'
 OUT = ROOT / 'reports/bank_factor_comparison_20261009.html'

@@ -1,7 +1,12 @@
 {
   "version": "1.0.0",
   "original_fact_files": [
-    "data/features/bank_original_evidence/4f3d52e1c9e4bd03f824e3431714ca6edb26ad53a75309a5c38a61e8a16b95fc/qualified_financial_facts_final.parquet"
+    "data/features/bank_original_evidence/4f3d52e1c9e4bd03f824e3431714ca6edb26ad53a75309a5c38a61e8a16b95fc/qualified_financial_facts_final.parquet",
+    "data/features/bank_original_evidence/c5bce00fd3d342f7d6cc013a3a5ab92176722c68d467ef64dbd056bb81ad26e3/supplemental_financial_facts.parquet",
+    "data/features/bank_original_evidence/65fc046b90af3c328c7e08c64fd8efb17f81bf071dbec8d40a1984ad821f5b79/supplemental_financial_facts.parquet",
+    "data/features/bank_original_evidence/7ed207483c0bdef5d8ae12a9842a033c59e2a12c90824f0be642af9870f32741/supplemental_financial_facts.parquet",
+    "data/features/bank_original_evidence/70771ad8a9627d6db95327e551aa14dd4752784c452d475bf722c0793af74562/supplemental_financial_facts.parquet",
+    "data/features/bank_original_evidence/77443fbfa1da8acf17799f8041d03a100e2748a8e28f4aefb8d6782d85d07c06/supplemental_financial_facts.parquet"
   ],
   "original_growth_files": [
     "data/features/bank_original_evidence/87b9bc04bf3cdb7701092750a6c22cac57619a5a50d1c707040bcb4de8225779/original_same_report_profit_growth_facts.parquet"

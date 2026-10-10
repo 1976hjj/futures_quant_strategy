@@ -7,6 +7,7 @@ from datetime import date
 from pathlib import Path
 
 import duckdb
+import numpy as np
 import pandas as pd
 
 from alpha_research_os.factors.bank import (
@@ -37,6 +38,48 @@ METRICS = {
 }
 
 
+def daily_pb_inputs(root: Path, start: date, end: date):
+    """Read existing daily PB with historical membership and immutable source IDs."""
+    settings = json.loads((root / "config/bank_timing_data.json").read_bytes())
+    if end < start or end > date.fromisoformat(settings["released_feature_end"]):
+        raise ValueError("PB window is outside released feature data; no holdout access")
+    with duckdb.connect(str(root / "data/warehouse/alpha_research.duckdb"), read_only=True) as connection:
+        frame = connection.execute("""SELECT d.trade_date AS session,d.ts_code AS instrument_id,
+            d.close,d.pb AS pb_daily,d.source_snapshot_id,d.source_payload_artifact_id
+            FROM research.daily_basic d WHERE d.trade_date BETWEEN ? AND ?
+            AND EXISTS (SELECT 1 FROM research.sw_industry_membership i
+                WHERE i.ts_code=d.ts_code AND i.l1_name='银行' AND i.in_date<=d.trade_date
+                AND (i.out_date IS NULL OR d.trade_date<i.out_date))
+            ORDER BY d.ts_code,d.trade_date""", [start, end]).df()
+    if frame.empty or frame.duplicated(["session", "instrument_id"]).any():
+        raise ValueError("银行日PB数据为空或日期/银行键重复")
+    if frame[["source_snapshot_id", "source_payload_artifact_id"]].isna().any().any():
+        raise ValueError("银行日PB缺少原始归档血缘")
+    frame["session"] = pd.to_datetime(frame.session).dt.date
+    valid = frame.pb_daily.map(finite) & (frame.pb_daily > 0)
+    frame["pb_daily"] = frame.pb_daily.where(valid)
+    frame["pb_status"] = valid.map({True: "READY", False: "MISSING_OR_NONPOSITIVE_DAILY_PB"})
+    frame["pb_basis"] = "archived_daily_basic_reported_pb; distinct_from_ordinary_equity_book_to_price"
+    frame["available_at"] = pd.to_datetime(frame.session.astype(str), utc=True) + pd.Timedelta(hours=9)
+    return frame
+
+
+def eligible_bank_market(connection, start: date, end: date):
+    """Push the bank key filter below the full-market universe's ranking windows."""
+    codes = [row[0] for row in connection.execute(
+        "SELECT DISTINCT ts_code FROM research.sw_industry_membership WHERE l1_name='银行' ORDER BY ts_code"
+    ).fetchall()]
+    if not codes:
+        raise ValueError("没有银行行业成员数据")
+    placeholders = ','.join('?' for _ in codes)
+    return connection.execute("""SELECT u.trade_date AS session,u.ts_code AS instrument_id,m.close
+        FROM research.universe_daily u JOIN research.market_daily m USING(trade_date,ts_code)
+        WHERE u.eligible_for_signal AND u.trade_date BETWEEN ? AND ? AND u.ts_code IN (""" + placeholders + """)
+        AND EXISTS (SELECT 1 FROM research.sw_industry_membership i WHERE i.ts_code=u.ts_code
+            AND i.l1_name='银行' AND i.in_date<=u.trade_date AND (i.out_date IS NULL OR u.trade_date<i.out_date))
+        ORDER BY u.ts_code,u.trade_date""", [start, end, *codes]).df()
+
+
 def source_inputs(root: Path, start: date, end: date):
     config = json.loads((root / "config/bank_factors.json").read_text(encoding="utf-8"))
     frames = []
@@ -63,8 +106,12 @@ def source_inputs(root: Path, start: date, end: date):
         frame["historical_grade"] = "same_document_comparative_only_known_at_current_publication"
         frames.append(frame)
     with duckdb.connect(str(root / "data/warehouse/bank_token.duckdb"), read_only=True) as c:
-        lineage = c.execute("SELECT * FROM bank_metric_lineage").df()
-        events = c.execute("SELECT * FROM bank_dividend_events").df()
+        cutoff = pd.Timestamp(end, tz="Asia/Shanghai") + pd.Timedelta(hours=15)
+        lineage = c.execute("""SELECT * FROM bank_metric_lineage WHERE try_cast(report_date AS DATE)<=?
+            AND try_cast(available_at AS TIMESTAMPTZ)<=?
+            AND (historical_pit_verified OR try_cast(retrieved_at AS TIMESTAMPTZ)<=?)""",
+                            [end, cutoff.to_pydatetime(), cutoff.to_pydatetime()]).df()
+        events = c.execute("SELECT * FROM bank_dividend_events WHERE try_cast(ex_date AS DATE)<=?", [end]).df()
         coverage = {row[0] for row in c.execute("SELECT DISTINCT ts_code FROM dividend").fetchall()}
     lineage["metric"] = lineage.metric.replace(METRIC_MAP)
     # Generic BPS includes other equity tools; only explicit ordinary BVPS is comparable.
@@ -132,16 +179,7 @@ def source_inputs(root: Path, start: date, end: date):
     events = reconcile_dividend_events(events)
     database = root / "data/warehouse/alpha_research.duckdb"
     with duckdb.connect(str(database), read_only=True) as c:
-        market = c.execute(
-            """SELECT u.trade_date AS session,u.ts_code AS instrument_id,m.close
-          FROM research.universe_daily u JOIN research.market_daily m USING(trade_date,ts_code)
-          WHERE u.eligible_for_signal AND u.trade_date BETWEEN ? AND ?
-          AND EXISTS (SELECT 1 FROM research.sw_industry_membership i
-            WHERE i.ts_code=u.ts_code AND i.l1_name='银行'
-            AND i.in_date<=u.trade_date AND (i.out_date IS NULL OR u.trade_date<i.out_date))
-          ORDER BY instrument_id,session""",
-            [start, end],
-        ).df()
+        market = eligible_bank_market(c, start, end)
         membership = c.execute("""SELECT * FROM research.sw_industry_membership WHERE l1_name='银行'
                                   ORDER BY ts_code,in_date,out_date,source_snapshot_id""").df()
         # Prices here are feature-domain observations, not forward return labels.
@@ -189,7 +227,7 @@ def select_fact(known: pd.DataFrame, metric: str, report_date: date | None = Non
 
 
 def financial_state(known: pd.DataFrame, session: date):
-    selected = {m: select_fact(known, m) for m in METRICS}
+    selected = {m: select_fact(known, m) for m in sorted(METRICS)}
     selected = {
         m: f if f and 0 <= (session - f["report_date"]).days <= MAX_REPORT_AGE_DAYS else None
         for m, f in selected.items()
@@ -291,7 +329,9 @@ def per_share_invalidations(bars, events):
 def build_features(facts, events, market, capitals, coverage):
     records = []
     for code, bars in market.groupby("instrument_id", sort=True):
-        ff = facts[facts.code == code]
+        ff = facts[facts.code == code].sort_values('available_at').reset_index(drop=True)
+        available = pd.to_datetime(ff.available_at, utc=True).astype('datetime64[ns, UTC]').astype('int64').to_numpy()
+        report_days = pd.to_datetime(ff.report_date).to_numpy(dtype='datetime64[D]').astype('int64')
         ev = events[(events.ts_code == code) & events.ex_date.notna()].to_dict("records")
         cap = capitals[capitals.ts_code == code]
         invalidations = per_share_invalidations(cap, ev)
@@ -299,11 +339,13 @@ def build_features(facts, events, market, capitals, coverage):
         for bar in bars.itertuples():
             day = bar.session
             cut = pd.Timestamp(day).tz_localize("Asia/Shanghai") + pd.Timedelta(hours=15)
-            known = ff[ff.available_at <= cut]
-            fresh = known.report_date.map(lambda d, day=day: 0 <= (day - d).days <= MAX_REPORT_AGE_DAYS)
-            key = (tuple(known.index), tuple(known[fresh].index))
+            size = int(np.searchsorted(available, cut.value, side='right'))
+            day_number = (day - date(1970, 1, 1)).days
+            fresh = ((report_days[:size] >= day_number - MAX_REPORT_AGE_DAYS)
+                     & (report_days[:size] <= day_number))
+            key = (size, tuple(np.flatnonzero(fresh)))
             if key not in cache:
-                cache[key] = financial_state(known, day)
+                cache[key] = financial_state(ff.iloc[:size], day)
             state, selected = cache[key]
             row = dict(state)
             cash = cash_per_current_share(ev, day, code in coverage)

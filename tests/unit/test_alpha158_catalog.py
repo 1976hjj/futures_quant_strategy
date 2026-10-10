@@ -36,18 +36,20 @@ def test_empty_project_shows_native_alpha158_and_jqdata_items_as_not_calculated(
     items = build_factor_catalog_overview(tmp_path)
     response = query_factor_catalog(items, page=1, page_size=24)
 
-    assert len(items) == 197
+    assert len(items) == 223
     assert response["counts"] == {
-        "total": 197,
+        "total": 223,
         "calculated": 0,
         "m4_completed": 0,
-        "not_calculated": 197,
+        "not_calculated": 223,
         "current": 4,
         "alpha158": 158,
         "jqdata": 35,
+        "bank": 16,
+        "bank_timing": 10,
     }
     assert len(response["items"]) == 24
-    assert response["totalPages"] == 9
+    assert response["totalPages"] == 10
 
 
 def test_explorer_index_keeps_latest_result_for_each_factor(tmp_path) -> None:

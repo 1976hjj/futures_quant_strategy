@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from alpha_research_os.factors import (
@@ -15,6 +17,23 @@ from alpha_research_os.factors import (
     process_cross_section,
 )
 from alpha_research_os.kernel.errors import IntegrityViolation
+from alpha_research_os.reporting.factor_catalog_overview import _release_index
+
+
+def test_catalog_reads_measured_coverage_from_quality_summary(tmp_path):
+    folder = tmp_path / 'data/factor_store/releases' / ('a' * 64)
+    folder.mkdir(parents=True)
+    (folder / 'manifest.json').write_text(json.dumps(dict(
+        release_id='sha256:' + 'a' * 64, created_at='2026-10-10T00:00:00Z', request=dict(
+            start='2020-01-02', end='2025-12-31',
+            factors=[dict(factor_id='bank-pb-daily', factor_version='1.0.0')]))))
+    (folder / 'quality_summary.json').write_text(json.dumps(dict(
+        row_count=1000, accuracy_gate=dict(status='PASS'), factors=[dict(
+            factor_id='bank-pb-daily', factor_version='1.0.0', row_count=100,
+            present_count=97, coverage=.97)])))
+    item = _release_index(tmp_path)[('bank-pb-daily', '1.0.0')][0]
+    assert (item['row_count'], item['present_count'], item['coverage']) == (100, 97, .97)
+    assert item['accuracy_status'] == 'PASS'
 
 
 def test_initial_catalog_contains_only_custom_factors() -> None:

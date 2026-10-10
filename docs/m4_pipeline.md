@@ -76,8 +76,8 @@ M4.5 的两两相关在数学上是 O(N²)：`N` 是因子×变体路径数，�
 流水线完成后，可启动 React 前端查看最新报告：
 
 ```powershell
-cd frontEnd
+cd E:\codex\Agent\quant_stock_strategy_system\frontEnd
 npm.cmd run dev
 ```
 
-前端 `predev`/`prebuild` 会运行 `scripts/sync-factor-data.mjs`，只读同步 `reports/factor_explorer/latest.json` 指向的展示快照。前端不连接 DuckDB，也不是新的证据生产阶段。
+当前前端通过研究 API 读取证据、提交计算任务，不直接连接 DuckDB。旧的仓库内 `frontEnd/` 快照应用已退役，源码可通过 Git 历史恢复。完整本地服务可由项目根目录 `run.ps1` 启动；前端地址为 `http://127.0.0.1:8872`。

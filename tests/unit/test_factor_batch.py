@@ -15,6 +15,26 @@ from scripts.serve_m4_control_api import _batch_stage_closure
 from scripts.serve_m4_control_api import FactorBatchManager
 
 
+def test_pb_only_batch_preflight_does_not_require_financial_facts(tmp_path, monkeypatch):
+    from scripts import serve_m4_control_api as control
+
+    (tmp_path / 'data/warehouse').mkdir(parents=True)
+    with duckdb.connect(str(tmp_path / 'data/warehouse/alpha_research.duckdb')) as connection:
+        connection.execute("CREATE SCHEMA research")
+        connection.execute("CREATE TABLE research.market_daily AS SELECT DATE '2025-12-31' AS trade_date")
+    reads = []
+    monkeypatch.setattr(control, 'daily_pb_inputs', lambda *args: reads.append(args))
+    monkeypatch.setattr(control, 'dependency_preflight',
+                        lambda *args: (_ for _ in ()).throw(AssertionError('must not read financial facts')))
+    monkeypatch.setattr(control, 'build_factor_catalog_overview', lambda root: [dict(
+        factor_id='bank-pb-daily', chinese_name='银行·日PB')])
+    payload = dict(start='2025-12-31', end='2025-12-31', stages=[],
+                   factors=[dict(factor_id='bank-pb-daily', factor_version='1.0.0')])
+    result = FactorBatchManager(tmp_path).preflight(payload)
+    assert result['status'] == 'READY' and result['bank_dependencies'] is None
+    assert len(reads) == 1 and reads[0][1:] == (date(2025, 12, 31), date(2025, 12, 31))
+
+
 def test_m45_preflight_adds_its_dependencies() -> None:
     assert _batch_stage_closure(("m4_5",)) == ["m4_1", "m4_2", "m4_3", "m4_4", "m4_5"]
 

@@ -31,9 +31,15 @@ class DataUpdateManager:
         return {part: self.run_root / f"{job_id}.{part}" for part in ("request.json", "progress.json", "log")}
 
     def running(self) -> bool:
+        from scripts.bank_factor_workflow import dependencies_running
+
+        if dependencies_running(self.root):
+            return True
         if self.process is not None and self.process.poll() is None:
             return True
-        for path in self.run_root.glob("*.progress.json"):
+        progress_files = [*self.run_root.glob("*.progress.json"),
+                          *(self.root / "reports/bank_processing").glob("*.progress.json")]
+        for path in progress_files:
             try:
                 if json.loads(path.read_bytes()).get("status") == "RUNNING":
                     return True

@@ -42,6 +42,11 @@ class BankFactor:
 def bank_factor_catalog() -> tuple[BankFactor, ...]:
     return (
         BankFactor(
+            "bank-pb-daily", "银行·日PB", "估值", "pb_daily", "archived_daily_basic.pb",
+            "复用已有日估值PB及原始归档血缘；2016年起携带上市后历史；与普通股账面市值比口径分别保存。",
+            "LOW",
+        ),
+        BankFactor(
             "bank-cash-dividend-yield-365",
             "银行·已实施现金股息率",
             "估值",

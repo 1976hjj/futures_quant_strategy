@@ -9,8 +9,10 @@ from typing import Any, Literal
 
 from alpha_research_os.factors.alpha158 import FactorCategory, alpha158_catalog
 from alpha_research_os.factors.bank import bank_factor_catalog
+from alpha_research_os.factors.bank_timing import bank_timing_overview
 from alpha_research_os.factors.jqdata import jqdata_catalog
 from alpha_research_os.factors.library import m4_2_factor_entries
+from alpha_research_os.reporting.bank_timing_readiness import attach_bank_timing_readiness
 
 CATEGORY_ORDER: tuple[FactorCategory, ...] = ("动量", "波动", "流动性", "质量", "估值", "风格", "量价", "形态")
 STATUS_ORDER = {
@@ -40,22 +42,25 @@ def _release_index(project_root: Path) -> dict[tuple[str, str], list[dict[str, A
         request = payload["request"]
         verification_path = path.parent / "accuracy_verification.json"
         quality_path = path.parent / "quality_summary.json"
+        quality = json.loads(quality_path.read_bytes()) if quality_path.exists() else {}
+        measurements = {(item['factor_id'], item['factor_version']): item for item in quality.get('factors', [])}
         if verification_path.exists():
             verification = json.loads(verification_path.read_bytes())
         elif quality_path.exists():
-            verification = json.loads(quality_path.read_bytes()).get("accuracy_gate") or {"status": "NOT_REQUIRED"}
+            verification = quality.get("accuracy_gate") or {"status": "NOT_REQUIRED"}
         else:
             verification = {"status": "NOT_REQUIRED"}
         for factor in request["factors"]:
+            measured = measurements.get((factor['factor_id'], factor['factor_version']), factor)
             index.setdefault((factor["factor_id"], factor["factor_version"]), []).append(
                 {
                     "release_id": payload["release_id"],
                     "start": request["start"],
                     "end": request["end"],
                     "created_at": payload.get("created_at", ""),
-                    "row_count": factor.get("row_count"),
-                    "present_count": factor.get("present_count"),
-                    "coverage": factor.get("coverage"),
+                    "row_count": measured.get("row_count"),
+                    "present_count": measured.get("present_count"),
+                    "coverage": measured.get("coverage"),
                     "accuracy_status": verification.get("status", "NOT_REQUIRED"),
                     "accuracy_error": verification.get("error"),
                 }
@@ -269,6 +274,7 @@ def build_factor_catalog_overview(project_root: Path) -> list[dict[str, Any]]:
             "research_scope": "银行范围；非银行不出值；历史版本认证未全部完成",
             **_dynamic_fields(published, result, alpha158=False),
         })
+    items.extend(attach_bank_timing_readiness(project_root, bank_timing_overview()))
     return items
 
 
@@ -279,7 +285,7 @@ def query_factor_catalog(
     page_size: int = 36,
     query: str = "",
     category: str = "全部",
-    source: Literal["ALL", "CURRENT", "ALPHA158", "JQDATA", "BANK"] = "ALL",
+    source: Literal["ALL", "CURRENT", "ALPHA158", "JQDATA", "BANK", "BANK_TIMING"] = "ALL",
     status: Literal[
         "ALL", "M4_COMPLETE", "CALCULATED", "CALCULATED_VERIFYING", "ACCURACY_FAILED", "NOT_CALCULATED"
     ] = "ALL",
@@ -325,6 +331,7 @@ def query_factor_catalog(
         "alpha158": sum(item["source_collection"] == "ALPHA158" for item in items),
         "jqdata": sum(item["source_collection"] == "JQDATA" for item in items),
         "bank": sum(item["source_collection"] == "BANK" for item in items),
+        "bank_timing": sum(item["source_collection"] == "BANK_TIMING" for item in items),
     }
     categories = {"全部": len(facet_items)} | {
         name: sum(item["category"] == name for item in facet_items) for name in CATEGORY_ORDER

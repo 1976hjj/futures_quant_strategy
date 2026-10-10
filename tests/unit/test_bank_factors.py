@@ -42,12 +42,12 @@ def dividend(day, cash, stock=0, publication=date(2023, 1, 1)):
 
 def test_catalog_bank_factors_are_distinct_and_paginated(tmp_path):
     factors = bank_factor_catalog()
-    assert len(factors) == len({x.factor_id for x in factors}) == 15
-    assert len(bank_catalog().list()) == 15
+    assert len(factors) == len({x.factor_id for x in factors}) == 16
+    assert len(bank_catalog().list()) == 16
     response = query_factor_catalog(build_factor_catalog_overview(tmp_path), source="BANK", page_size=5, page=2)
-    assert response["totalItems"] == 15
-    assert response["totalPages"] == 3
-    assert response["counts"]["bank"] == 15
+    assert response["totalItems"] == 16
+    assert response["totalPages"] == 4
+    assert response["counts"]["bank"] == 16
     assert len(response["items"]) == 5
     assert all(x["source_collection"] == "BANK" for x in response["items"])
 

@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Bank allocation target: future research output contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["session", "sector_id", "data_pack_id", "allocation_rule_version", "signal_cutoff_at", "earliest_execution_session", "bank_budget_usage", "decision_status", "reason_codes", "indicator_references", "stock_selection_version"],
+  "properties": {
+    "session": {"type": "string", "format": "date"},
+    "sector_id": {"const": "BANK"},
+    "data_pack_id": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "allocation_rule_version": {"type": "string", "minLength": 1},
+    "signal_cutoff_at": {"type": "string", "format": "date-time"},
+    "earliest_execution_session": {"type": "string", "format": "date"},
+    "bank_budget_usage": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+    "decision_status": {"enum": ["TARGET", "INSUFFICIENT_DATA"]},
+    "reason_codes": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+    "indicator_references": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["factor_id", "factor_version", "indicator_release_id"],
+        "properties": {
+          "factor_id": {"type": "string", "minLength": 1},
+          "factor_version": {"type": "string", "minLength": 1},
+          "indicator_release_id": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "stock_selection_version": {"type": "string", "minLength": 1}
+  },
+  "allOf": [
+    {"if": {"properties": {"decision_status": {"const": "INSUFFICIENT_DATA"}}}, "then": {"properties": {"bank_budget_usage": {"type": "null"}}}},
+    {"if": {"properties": {"decision_status": {"const": "TARGET"}}}, "then": {"properties": {"bank_budget_usage": {"type": "number"}, "indicator_references": {"minItems": 1}}}}
+  ]
+}

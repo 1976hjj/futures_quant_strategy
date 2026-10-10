@@ -53,6 +53,8 @@ from scripts.data_update_api import DataUpdateManager  # noqa: E402
 def strategy_options(project_root: Path) -> dict[str, Any]:
     factors = []
     for item in build_factor_catalog_overview(project_root):
+        if item.get("observation_level") == "SECTOR":
+            continue
         if not item["calculated"] or not item["latest_release_id"] or item.get("accuracy_status") == "FAIL":
             continue
         coverage = item.get("coverage") or {}
@@ -110,7 +112,7 @@ def rotation_options(project_root: Path) -> dict[str, Any]:
             "end": (item.get("coverage") or {}).get("end"),
         }
         for item in factor_catalog
-        if item.get("accuracy_status") != "FAIL"
+        if item.get("accuracy_status") != "FAIL" and item.get("observation_level") != "SECTOR"
     ]
     return {
         **options,

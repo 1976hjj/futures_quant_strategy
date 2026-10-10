@@ -1,5 +1,7 @@
 # Factor Evidence Explorer 前端设计
 
+本文保留 M4.7 首版只读快照的设计与验收背景。旧仓库内 `frontEnd/` 已退役，源码保留在 Git 历史；当前业务前端位于 `E:\codex\Agent\quant_stock_strategy_system\frontEnd`，通过 API 支持计算及结果查看。
+
 状态：M4.7 MVP 已实现 React 首版；当前展示 M4.1～M4.6，M6 面板等待对应资产发布。
 
 ## 1. 产品定位
@@ -42,20 +44,20 @@ frontEnd/ React + TypeScript + Vite
 
 首版不使用 CDN，字体、样式和脚本均由 Vite 本地打包。浏览器不直接连接 DuckDB，也不读取 `secrets/`、Tushare Token 或原始供应商响应。
 
-React 开发环境启动：
+当前业务前端开发环境启动（完整服务可用项目根目录 `run.ps1`）：
 
 ```powershell
-cd D:\futures_quant_strategy\frontEnd
+cd E:\codex\Agent\quant_stock_strategy_system\frontEnd
 npm.cmd install
 npm.cmd run dev
 ```
 
-访问 `http://127.0.0.1:5173`。`predev` 会自动从 `reports/factor_explorer/latest.json` 找到最新报告并同步数据，无需手工复制 JSON。
+访问 `http://127.0.0.1:8872`。当前前端由研究 API 读取结果，无需手工复制 JSON。
 
 生产构建：
 
 ```powershell
-cd D:\futures_quant_strategy\frontEnd
+cd E:\codex\Agent\quant_stock_strategy_system\frontEnd
 npm.cmd run build
 npm.cmd run preview
 ```
