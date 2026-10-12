@@ -13,7 +13,7 @@ def historical_percentiles(panel, calendar, window=756, minimum=504):
     for code, group in panel.groupby("instrument_id", sort=True):
         indexed = group.set_index("session").reindex(calendar)
         result = pd.DataFrame({"session": calendar, "instrument_id": code})
-        for source, name in (("book_to_price", "pb_percentile"), ("cash_yield365", "yield_percentile"),
+        for source, name in (("book_to_price", "pb_percentile"), ("cash_yield_cycle", "yield_percentile"),
                              ("annual_earnings_yield", "earnings_percentile")):
             values = pd.to_numeric(indexed[source], errors="coerce").where(lambda value: np.isfinite(value))
             if source == "book_to_price":
@@ -35,6 +35,10 @@ def calculate_sector_indicators(history, technical, basket, benchmark, readiness
                                 pb_history=None, valuation_history=None):
     pb_ids = {item.factor_id for item in bank_timing_catalog() if "pb_daily" in item.required_fields}
     requested = readiness if not selected else readiness[readiness.factor_id.isin(selected)]
+    cycle_ids = {item.factor_id for item in bank_timing_catalog() if "cash_yield_cycle" in item.required_fields}
+    if requested.factor_id.isin(cycle_ids).any() and ("cash_yield_cycle" not in history
+            or (valuation_history is not None and "cash_yield_cycle" not in valuation_history)):
+        raise ValueError("新版股息率板块指标需要一年分红周期输入，请重新准备依赖；不能复用旧365日输入。")
     if pb_history is None and requested.factor_id.isin(pb_ids).any():
         raise ValueError("PB板块指标需要日PB历史，请重新准备依赖；不能复用旧普通股账面市值比输入。")
     valuation = history if valuation_history is None else valuation_history[

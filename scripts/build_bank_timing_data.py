@@ -31,7 +31,7 @@ from alpha_research_os.kernel.canonical import content_hash  # noqa: E402
 from scripts.bank_factor_inputs import select_fact  # noqa: E402
 
 ENGINE = "bank-allocation-inputs-1.0.0"
-FIELDS = ("book_to_price", "cash_yield365", "annual_earnings_yield", "quality_gate", "nim_change",
+FIELDS = ("book_to_price", "cash_yield_cycle", "annual_earnings_yield", "quality_gate", "nim_change",
           "profit_growth", "npl_improvement", "provision_change_yoy", "cet1_change_yoy", "bank_total_return_index")
 
 
@@ -117,7 +117,7 @@ def input_readiness(panel, basket, benchmark, config):
         pb_field = "pb_daily" if "pb_daily" in group else "book_to_price"
         pb_current = np.isfinite(pd.to_numeric(group[pb_field], errors="coerce")) & (group[pb_field] > 0)
         pb = pb_current & (group.pb_history_count >= history_min)
-        dy = finite["cash_yield365"] & (group.yield_history_count >= history_min)
+        dy = finite["cash_yield_cycle"] & (group.yield_history_count >= history_min)
         ey = finite["annual_earnings_yield"] & (group.earnings_history_count >= history_min)
         qualified = group.quality_gate == 1
         masks = (pb, dy, pb & dy, qualified & pb & dy, finite["nim_change"],
@@ -158,9 +158,9 @@ def input_readiness(panel, basket, benchmark, config):
                     detail += f"；PB当日缺失或非正{missing}家，PB有效历史不足{history_min}个交易日{warming}家"
                     reason = ("PB_CURRENT_INPUT_MISSING" if missing
                               else "PB_VALID_HISTORY_INSUFFICIENT" if warming else reason)
-                if "cash_yield365" in item.required_fields:
-                    yield_missing = int((~finite['cash_yield365']).sum())
-                    yield_warming = int((finite['cash_yield365'] & (group.yield_history_count < history_min)).sum())
+                if "cash_yield_cycle" in item.required_fields:
+                    yield_missing = int((~finite['cash_yield_cycle']).sum())
+                    yield_warming = int((finite['cash_yield_cycle'] & (group.yield_history_count < history_min)).sum())
                     detail += f"；已实施股息率当日缺失{yield_missing}家，有效历史不足{history_min}日{yield_warming}家"
                 if "annual_earnings_yield" in item.required_fields:
                     earnings_missing = int((~finite['annual_earnings_yield']).sum())
@@ -210,7 +210,7 @@ def build(root: Path, start: date, end: date, source_path: Path | None = None):
         raise ValueError("Frozen feature availability exceeds the declared source cutoff")
     warmup = date.fromisoformat(config["market_warmup_start"])
     valuation_history = features[['session', 'instrument_id', 'book_to_price',
-                                  'cash_yield365', 'annual_earnings_yield']].copy()
+                                  'cash_yield_cycle', 'annual_earnings_yield']].copy()
     features = features[features.session >= warmup].reset_index(drop=True)
     print("Loading bounded frozen market and dividend evidence", flush=True)
     with duckdb.connect() as connection:

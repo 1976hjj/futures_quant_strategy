@@ -26,6 +26,7 @@ from scripts.bank_processing import (  # noqa: E402
     table_page,
 )
 from scripts.bank_processing_api import BankProcessingManager  # noqa: E402
+from scripts.data_maintenance import update_history  # noqa: E402
 from scripts.data_update import DataUpdateRequest, inventory, plan  # noqa: E402
 from scripts.data_update_api import DataUpdateManager  # noqa: E402
 
@@ -67,6 +68,10 @@ def make_handler(root: Path, manager: DataUpdateManager, origins: set[str], stra
                     self.reply(HTTPStatus.OK, {"status": "ok", "service": "data-management"})
                 elif path == "/api/v1/data/inventory":
                     self.reply(HTTPStatus.OK, inventory(root))
+                elif path == "/api/v1/data/history":
+                    query = parse_qs(urlparse(self.path).query)
+                    self.reply(HTTPStatus.OK, update_history(root, int(query.get("page", ["1"])[0]),
+                                                            int(query.get("page_size", ["10"])[0])))
                 elif path == "/api/v1/data/processing/inventory":
                     self.reply(HTTPStatus.OK, processing_inventory(root))
                 elif path == "/api/v1/data/processing/jobs/latest":

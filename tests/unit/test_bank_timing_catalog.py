@@ -48,7 +48,7 @@ def test_sector_factors_share_compute_routes_but_reject_stock_m4(indicator):
 def test_mixed_stock_and_sector_batch_is_supported_without_sector_cohort_members():
     request = FactorBatchRequest(
             factors=[
-                dict(factor_id="bank-cash-dividend-yield-365", factor_version="1.0.0"),
+                dict(factor_id="bank-cash-dividend-yield-365", factor_version="2.0.0"),
                 dict(factor_id="bank-sector-trend-breadth", factor_version="1.0.0"),
             ],
             start="2020-01-02", end="2025-12-31", stages=["m4_1"],

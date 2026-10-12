@@ -23,7 +23,7 @@ from alpha_research_os.kernel.specs import (
     SignalCutoff,
 )
 
-ENGINE_VERSION = "bank-disclosure-feature-1.0.0"
+ENGINE_VERSION = "bank-disclosure-feature-1.1.0"
 MAX_REPORT_AGE_DAYS = 550
 
 
@@ -48,11 +48,12 @@ def bank_factor_catalog() -> tuple[BankFactor, ...]:
         ),
         BankFactor(
             "bank-cash-dividend-yield-365",
-            "银行·已实施现金股息率",
+            "银行·分红周期股息率",
             "估值",
-            "cash_yield365",
-            "cash_dividend_per_current_share_365 / raw_close",
-            "近365天已除权实施的税前现金股息／原始收盘价；按已知送转折算，不使用未来拟派息。",
+            "cash_yield_cycle",
+            "known_annual_cycle_cash_per_current_share / raw_close",
+            "按分红所属期间覆盖一年：年度一次或中期与末期组合；首次增加中期保留完整年度参考，缺期留空；不使用未来拟派息。历史ID中的365仅为兼容，2.0.0已改为周期口径。",
+            factor_version="2.0.0",
         ),
         BankFactor(
             "bank-earnings-yield-annual",
@@ -162,11 +163,12 @@ def bank_factor_catalog() -> tuple[BankFactor, ...]:
         ),
         BankFactor(
             "bank-quality-dividend-yield-365",
-            "银行·质量门槛后股息率",
+            "银行·质量门槛后周期股息率",
             "估值",
-            "gated_cash_yield365",
-            "cash_yield365 if quality_gate == 1 else missing",
+            "gated_cash_yield_cycle",
+            "cash_yield_cycle if quality_gate == 1 else missing",
             "原研究结构的组合对照：门槛合格后按未封顶现金股息率排序；不合格留空，不以0参与排名。",
+            factor_version="2.0.0",
         ),
     )
 
@@ -261,6 +263,81 @@ def roe_history_statistics(values: list[tuple[date, float]], latest: date):
         return None, None
     sample = [years[year] for year in wanted]
     return float(median(sample)), float(pstdev(sample))
+
+
+@dataclass(frozen=True)
+class DividendCycle:
+    cash: float | None
+    status: str
+    period_end: date | None = None
+    event_count: int = 0
+    components: tuple = ()
+
+
+def dividend_cycle(events: list[dict], session: date, archive_complete: bool = True) -> DividendCycle:
+    """Annual cash on fiscal periods, not on a 365-day payment cutoff.
+
+    An annual event is a closing/final distribution. Its same-year interim(s)
+    form the full year. A new interim can replace the same period last year
+    only when that previous interim exists; otherwise this is a frequency
+    transition and the last complete annual reference is retained explicitly.
+    No event is NOT proof of zero dividends or cancellation.
+    """
+    if not archive_complete:
+        return DividendCycle(None, "DIVIDEND_ARCHIVE_UNAVAILABLE")
+    known = [e for e in events if e.get("ex_date") is not None and e["ex_date"] <= session
+             and e.get("imp_ann_date") is not None and e["imp_ann_date"] < session]
+    if not known:
+        return DividendCycle(None, "NO_KNOWN_IMPLEMENTED_CYCLE")
+    if any(not isinstance(e.get("end_date"), date) for e in known):
+        return DividendCycle(None, "DIVIDEND_PERIOD_MISSING")
+    annual = [e for e in known if (e["end_date"].month, e["end_date"].day) == (12,31)
+              and e["end_date"] <= session]
+    if not annual:
+        return DividendCycle(None, "ANNUAL_CYCLE_NOT_YET_COMPLETE")
+    end = max(e["end_date"] for e in annual)
+    if any(e["end_date"] > session for e in known):
+        return DividendCycle(None, "DIVIDEND_PERIOD_AFTER_INFORMATION_DATE")
+    base = [e for e in known if e["end_date"].year == end.year]
+    interim = [e for e in base if e["end_date"] < end]
+    previous_interim = [e for e in known if e["end_date"].year == end.year-1
+                        and (e["end_date"].month,e["end_date"].day) in ((6,30),(9,30))]
+    if not interim and previous_interim:
+        return DividendCycle(None, "EXPECTED_INTERIM_MISSING_NOT_PROVEN_CANCELLED", end)
+    selected = base
+    status = "READY_ANNUAL_ONCE" if not interim else "READY_ANNUAL_SPLIT"
+    newer = [e for e in known if e["end_date"] > end]
+    if newer:
+        current = max(e["end_date"] for e in newer)
+        old = date(current.year-1,current.month,current.day)
+        if current.year == end.year+1 and any(e["end_date"] == old for e in interim):
+            selected = [e for e in known if old < e["end_date"] <= current]
+            end = current
+            status = "READY_ROLLING_SPLIT_CYCLE"
+        else:
+            status = "FREQUENCY_TRANSITION_LAST_COMPLETE_ANNUAL_REFERENCE"
+    oldest_boundary = date(end.year-1,end.month,end.day)
+    # Off-cycle source periods (e.g. a rights-issue date reported as dividend)
+    # must be reconciled, not silently counted as ordinary annual cash.
+    if any((e["end_date"].month,e["end_date"].day) not in ((6,30),(9,30),(12,31))
+           and e["end_date"] > oldest_boundary for e in known):
+        return DividendCycle(None, "NONSTANDARD_DIVIDEND_PERIOD_REQUIRES_REVIEW", end)
+    if (session-max(e["ex_date"] for e in selected)).days > MAX_REPORT_AGE_DAYS:
+        return DividendCycle(None, "STALE_CYCLE_REQUIRES_DISCLOSURE_REVIEW", end)
+    if len({e["end_date"] for e in selected}) != len(selected):
+        return DividendCycle(None, "MULTIPLE_PAYMENTS_SAME_PERIOD_REQUIRES_REVIEW", end)
+    total, parts = 0., []
+    for event in selected:
+        if bool(event.get("event_conflict", False)) or not finite(event.get("cash_div_tax")) or event["cash_div_tax"] < 0:
+            return DividendCycle(None, "DIVIDEND_AMOUNT_OR_EVENT_CONFLICT", end)
+        affected = [e for e in known if e["ex_date"] >= event["ex_date"]]
+        if any(not finite(e.get("stk_div")) or e["stk_div"] < 0 for e in affected):
+            return DividendCycle(None, "SHARE_DISTRIBUTION_UNKNOWN", end)
+        scale = math.prod(1+e["stk_div"] for e in affected)
+        amount = event["cash_div_tax"]/scale
+        total += amount
+        parts.append((event["end_date"],event["ex_date"],event["cash_div_tax"],scale,amount))
+    return DividendCycle(total,status,end,len(selected),tuple(parts))
 
 
 def cash_per_current_share(events: list[dict], session: date, archive_complete: bool = True):

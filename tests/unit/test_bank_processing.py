@@ -51,7 +51,7 @@ def test_processing_contract_rejects_bad_stage_paths_and_indicator_choices(paylo
 def test_percentiles_use_midrank_current_history_and_consume_calendar_gaps():
     days = [date(2024, 4, day) for day in range(1, 6)]
     panel = pd.DataFrame([{'session': day, 'instrument_id': 'A', 'book_to_price': 1 / value,
-                           'cash_yield365': value, 'annual_earnings_yield': value}
+                           'cash_yield_cycle': value, 'annual_earnings_yield': value}
                           for day, value in zip([days[0], days[1], days[3], days[4]], [1, 1, 2, 99], strict=True)])
     output = historical_percentiles(panel, days, window=3, minimum=2)
     assert pd.isna(output.pb_percentile.iloc[0])
@@ -92,7 +92,7 @@ def test_changed_preflight_is_rejected_without_launching_worker(tmp_path, monkey
 def test_sector_release_uses_pre_start_history_and_supports_result_reuse(tmp_path):
     settings(tmp_path)
     days = [date(2024, 4, day) for day in range(1, 5)]
-    history = pd.DataFrame([dict(session=day, instrument_id='A', book_to_price=2., cash_yield365=.05,
+    history = pd.DataFrame([dict(session=day, instrument_id='A', book_to_price=2., cash_yield_cycle=.05,
                                 annual_earnings_yield=.1, quality_gate=1, nim_change=-.1,
                                 bank_total_return_index=100.) for day in days])
     technical = history[['session', 'instrument_id', 'bank_total_return_index']].assign(total_return_segment=0)
@@ -126,7 +126,7 @@ def test_sector_release_uses_pre_start_history_and_supports_result_reuse(tmp_pat
 
 def test_sector_formulas_and_invalid_relative_endpoints_preserve_missing_values():
     days = [date(2024, 4, day) for day in range(1, 5)]
-    history = pd.DataFrame([dict(session=day, instrument_id='A', book_to_price=2., cash_yield365=.05,
+    history = pd.DataFrame([dict(session=day, instrument_id='A', book_to_price=2., cash_yield_cycle=.05,
                                 annual_earnings_yield=.1, quality_gate=1, nim_change=-.1, profit_growth=-.1,
                                 npl_improvement=-.1, provision_change_yoy=-.1, cet1_change_yoy=-.1,
                                 bank_total_return_index=100.) for day in days])
@@ -158,10 +158,22 @@ def test_new_pb_sector_cannot_silently_use_legacy_common_equity_inputs():
                                     selected=['bank-sector-pb-history-percentile'])
 
 
+@pytest.mark.parametrize('legacy_in', ['history', 'valuation'])
+def test_cycle_sector_rejects_legacy_dividend_dependencies(legacy_in):
+    cycle = pd.DataFrame({'cash_yield_cycle': [.05]})
+    legacy = pd.DataFrame({'cash_yield365': [.05]})
+    readiness = pd.DataFrame([dict(factor_id='bank-sector-dividend-history-percentile')])
+    with pytest.raises(ValueError, match='不能复用旧365日输入'):
+        calculate_sector_indicators(legacy if legacy_in == 'history' else cycle,
+                                    None, None, None, readiness, [], {},
+                                    selected=['bank-sector-dividend-history-percentile'],
+                                    valuation_history=legacy if legacy_in == 'valuation' else None)
+
+
 def test_dividend_sector_ranks_pre_start_warmup_and_excludes_future():
     days = [date(2024, 4, day) for day in range(1, 6)]
     valuation = pd.DataFrame([dict(session=day, instrument_id='A', book_to_price=2.,
-                                  cash_yield365=value, annual_earnings_yield=.1)
+                                  cash_yield_cycle=value, annual_earnings_yield=.1)
                              for day, value in zip(days, [.01, .02, .03, .04, 999.], strict=True)])
     history = valuation[valuation.session == days[3]].assign(bank_total_return_index=100.)
     technical = history[['session', 'instrument_id', 'bank_total_return_index']].assign(total_return_segment=0)

@@ -13,6 +13,7 @@ import pandas as pd
 from alpha_research_os.factors.bank import (
     MAX_REPORT_AGE_DAYS,
     cash_per_current_share,
+    dividend_cycle,
     finite,
     quality_gate,
     quality_score,
@@ -349,6 +350,7 @@ def build_features(facts, events, market, capitals, coverage):
             state, selected = cache[key]
             row = dict(state)
             cash = cash_per_current_share(ev, day, code in coverage)
+            cycle = dividend_cycle(ev, day, code in coverage)
             eps = normalize_per_share(selected["ordinary_eps_basic"], ev, invalidations, day)
             bps = normalize_per_share(selected["common_bvps"], ev, invalidations, day)
             price = float(bar.close)
@@ -357,6 +359,11 @@ def build_features(facts, events, market, capitals, coverage):
                 instrument_id=code,
                 close=price,
                 cash_yield365=cash / price if finite(cash) and price > 0 else None,
+                cash_yield_cycle=cycle.cash / price if finite(cycle.cash) and price > 0 else None,
+                cash_yield_cycle_status=cycle.status,
+                dividend_cycle_period_end=cycle.period_end,
+                dividend_cycle_event_count=cycle.event_count,
+                dividend_cycle_cash=cycle.cash,
                 annual_earnings_yield=eps / price if finite(eps) and price > 0 else None,
                 book_to_price=bps / price if finite(bps) and bps > 0 and price > 0 else None,
                 available_at=cut.tz_convert("UTC"),
@@ -365,6 +372,7 @@ def build_features(facts, events, market, capitals, coverage):
                 optional_npl_trend_unknown=not finite(row["npl_improvement"]),
             )
             row["gated_cash_yield365"] = row["cash_yield365"] if row["quality_gate"] == 1 else None
+            row["gated_cash_yield_cycle"] = row["cash_yield_cycle"] if row["quality_gate"] == 1 else None
             records.append(row)
         print(f"bank={code} rows={len(bars)}", flush=True)
     return pd.DataFrame(records)

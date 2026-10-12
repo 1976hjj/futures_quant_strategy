@@ -47,6 +47,11 @@ reports/**
 *.feather
 *.log
 
+# Local temporary files, test scratch directories and PDF previews
+/tmp/
+# Generated reports
+/output/pdf/
+
 # Research runtime output; curated Markdown records may be committed
 research/experiments/**
 !research/experiments/**/

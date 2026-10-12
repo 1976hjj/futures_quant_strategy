@@ -38,21 +38,21 @@ def bank_timing_catalog() -> tuple[BankTimingIndicator, ...]:
         ),
         BankTimingIndicator(
             "bank-sector-dividend-history-percentile", "银行板块·股息率历史分位", "估值", 1,
-            "mean_i(time_percentile_756(cash_yield365_i)); companion=median_i",
+            "mean_i(time_percentile_756(cash_yield_cycle_i)); companion=median_i",
             "使用近365天已实施税前现金股息率，各股先算自身历史分位；不混用供应商TTM或拟派息。",
-            ("cash_yield365",), ("mean", "median"), "HIGH", history,
+            ("cash_yield_cycle",), ("mean", "median"), "HIGH", history,
         ),
         BankTimingIndicator(
             "bank-sector-cheap-high-yield-breadth", "银行板块·低估高息联合占比", "估值", 1,
             "count(pb_percentile <= .20 AND yield_percentile >= .80) / count(both_valid)",
             "衡量低PB、高股息率同时出现的普遍程度；20%与80%是待验证的研究默认值。",
-            ("book_to_price", "cash_yield365"), ("breadth",), "HIGH", joint,
+            ("book_to_price", "cash_yield_cycle"), ("breadth",), "HIGH", joint,
         ),
         BankTimingIndicator(
             "bank-sector-quality-cheap-high-yield-breadth", "银行板块·质量合格低估高息占比", "估值", 1,
             "count(quality_gate == 1 AND cheap_high_yield) / count(quality_gate == 1 AND both_valid)",
             "分母仅包含已有质量门槛合格且估值双项有效的银行；同时报告质量合格覆盖率，不把未知当不合格。",
-            ("book_to_price", "cash_yield365", "quality_gate"), ("breadth", "quality_eligible_count"),
+            ("book_to_price", "cash_yield_cycle", "quality_gate"), ("breadth", "quality_eligible_count"),
             "HIGH", joint,
         ),
         BankTimingIndicator(
@@ -80,7 +80,7 @@ def bank_timing_catalog() -> tuple[BankTimingIndicator, ...]:
             "bank-sector-valuation-dispersion", "银行板块·估值分化程度", "风格", 2,
             "Q75_i(pb_percentile) - Q25_i(pb_percentile); companion=IQR_i(yield_percentile)",
             "观察个股自身历史估值位置的离散程度；按当时可知银行类型作附加拆分，方向仅用于诊断。",
-            ("book_to_price", "cash_yield365"), ("pb_iqr", "yield_iqr"), "DIAGNOSTIC", history,
+            ("book_to_price", "cash_yield_cycle"), ("pb_iqr", "yield_iqr"), "DIAGNOSTIC", history,
             "总体分化复用估值数据；银行类型拆分需可追溯历史分类，缺失时留空而不以当前分类回填。",
         ),
         BankTimingIndicator(
@@ -102,13 +102,16 @@ def bank_timing_catalog() -> tuple[BankTimingIndicator, ...]:
     )
 
 
-    return tuple(replace(item, factor_version="2.0.0",
+    pb_items = tuple(replace(item, factor_version="2.0.0",
                          required_fields=tuple("pb_daily" if field == "book_to_price" else field
                                                for field in item.required_fields),
                          formula=item.formula.replace("1 / book_to_price_i", "pb_daily_i"),
                          dependency_note=(item.dependency_note
                                           + " PB复用已归档日估值，预热从2016年或上市后开始；普通股账面市值比另列。"))
                  if "book_to_price" in item.required_fields else item for item in items)
+    return tuple(replace(item, factor_version="3.0.0" if item.factor_version == "2.0.0" else "2.0.0",
+                         dependency_note=item.dependency_note + " ?????????????365??????????")
+                 if "cash_yield_cycle" in item.required_fields else item for item in pb_items)
 
 
 def is_bank_timing_indicator(factor_id: str) -> bool:

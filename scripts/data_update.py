@@ -241,6 +241,13 @@ def inventory(root: Path) -> dict[str, Any]:
             counts = {api: len(partitions) for api, partitions in state.get("completed", {}).items()}
             published = _published(root, group, state)
             datasets = _datasets(state, group)
+            collection_times = [
+                entry["retrieved_at"]
+                for partitions in state.get("completed", {}).values()
+                for entry in partitions.values()
+                if isinstance(entry, dict) and entry.get("retrieved_at")
+            ]
+            last_collected_at = max(collection_times, default=None)
         elif group == "benchmark":
             path = root / "data" / "benchmarks" / "csi300_daily.json"
             value = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
@@ -248,11 +255,13 @@ def inventory(root: Path) -> dict[str, Any]:
             counts = {"sessions": len(value.get("daily", []))}
             published = bool(value)
             datasets = [{"id": "csi300_daily", "start": start, "end": end, "partitions": len(value.get("daily", []))}]
+            last_collected_at = value.get("retrieved_at")
         else:
             start = end = None
             counts = {}
             published = True
             datasets = []
+            last_collected_at = None
         items.append(
             {
                 "id": group,
@@ -266,6 +275,7 @@ def inventory(root: Path) -> dict[str, Any]:
                 "partitions": counts,
                 "datasets": datasets,
                 "published": published,
+                "last_collected_at": last_collected_at,
             }
         )
     factors = []
@@ -274,7 +284,7 @@ def inventory(root: Path) -> dict[str, Any]:
         credential_status = "configured" if configured else "missing"
     except ValueError:
         configured, credential_status = False, "invalid"
-    return {
+    result = {
         "today": date.today().isoformat(),
         "latest_complete_day": latest_complete_day().isoformat(),
         "groups": items,
@@ -322,6 +332,10 @@ def inventory(root: Path) -> dict[str, Any]:
         ],
         "defaults": {"groups": list(LEGACY_GROUPS), "factor_ids": []},
     }
+    from scripts.data_maintenance import maintenance_inventory
+
+    result["maintenance"] = maintenance_inventory(root, result)
+    return result
 
 
 def plan(root: Path, request: DataUpdateRequest) -> dict[str, Any]:
@@ -342,6 +356,8 @@ def plan(root: Path, request: DataUpdateRequest) -> dict[str, Any]:
     for group in selected:
         current = group_by_id[group]
         needs_update = (current["end"] or "") < end or not current["published"]
+        if group == "financial" and request.refresh_recent_periods > 0:
+            needs_update = True
         if group == "bank_industry":
             collected = current.get("last_collected_at") or ""
             needs_update = needs_update or collected[:10] != date.today().isoformat()
@@ -361,6 +377,7 @@ def plan(root: Path, request: DataUpdateRequest) -> dict[str, Any]:
                 "name": current["name"],
                 "current_end": current["end"],
                 "needs_update": needs_update,
+                "refresh_recent_periods": request.refresh_recent_periods if group == "financial" else 0,
                 "source_id": request.source_id,
                 "requires_token": group in ARCHIVES or group == "bank_industry",
                 "last_collected_at": current.get("last_collected_at"),
@@ -615,6 +632,7 @@ def run(root: Path, request: DataUpdateRequest, progress_path: Path, log_path: P
             progress=100,
             completed_groups=len(selected),
             total_groups=len(selected),
+            updated_groups=[stage["id"] for stage in selected],
         )
 
 

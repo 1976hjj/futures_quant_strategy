@@ -215,7 +215,7 @@ def history_readiness(panel: pd.DataFrame, calendar: list[date], window: int = 7
     source_panel = panel if valuation_history is None else valuation_history[
         valuation_history.session <= max(calendar)]
     full_calendar = sorted(set(calendar) | set(source_panel.session))
-    for source, output in (("book_to_price", "pb_history_count"), ("cash_yield365", "yield_history_count"),
+    for source, output in (("book_to_price", "pb_history_count"), ("cash_yield_cycle", "yield_history_count"),
                            ("annual_earnings_yield", "earnings_history_count")):
         counts = []
         for code, group in panel.groupby("instrument_id", sort=True):
@@ -268,7 +268,7 @@ def latest_input_gaps(panel: pd.DataFrame, history_min: int, trend_min: int):
     for row in latest.sort_values("instrument_id").to_dict("records"):
         for field, counter, required in (
             ("pb_daily" if "pb_daily" in panel else "book_to_price", "pb_history_count", history_min),
-            ("cash_yield365", "yield_history_count", history_min),
+            ("cash_yield_cycle", "yield_history_count", history_min),
             ("annual_earnings_yield", "earnings_history_count", history_min),
             ("bank_total_return_index", "segment_observations", trend_min),
             ("quality_gate", None, None), ("nim_change", None, None),

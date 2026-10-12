@@ -20,7 +20,7 @@ def fixture_pack(root):
         'frozen_bank_input': 'source_not_to_be_read',
     }))
     days = [date(2024, 4, day) for day in range(1, 5)]
-    history = pd.DataFrame([dict(session=day, instrument_id='A', book_to_price=2., cash_yield365=.05,
+    history = pd.DataFrame([dict(session=day, instrument_id='A', book_to_price=2., cash_yield_cycle=.05,
                                 annual_earnings_yield=.1, quality_gate=1, bank_total_return_index=100.)
                            for day in days])
     factor_id = 'bank-sector-pb-history-percentile'
@@ -103,7 +103,7 @@ def test_stock_dependency_reuses_verified_snapshot_without_recalculating_bank_da
 
 @pytest.mark.parametrize('stages', [[], ['m4_1'], ['m4_5']])
 def test_mixed_batch_dispatches_sector_script_and_keeps_sector_out_of_stock_m4(tmp_path, monkeypatch, stages):
-    selected = [dict(factor_id='bank-cash-dividend-yield-365', factor_version='1.0.0'),
+    selected = [dict(factor_id='bank-cash-dividend-yield-365', factor_version='2.0.0'),
                 dict(factor_id='bank-common-book-to-price', factor_version='1.0.0'),
                 dict(factor_id='bank-sector-trend-breadth', factor_version='1.0.0')]
     # Use a real stock ID from the current bank definitions.

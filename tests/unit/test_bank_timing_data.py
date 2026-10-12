@@ -19,7 +19,7 @@ from scripts.build_bank_timing_data import released_window
 def test_valuation_warmup_counts_pre_start_history_without_using_future():
     days = [date(2020, 1, day) for day in range(1, 6)]
     values = pd.DataFrame([dict(session=day, instrument_id='BANK', book_to_price=2.,
-                                cash_yield365=.01 * i, annual_earnings_yield=.02 * i)
+                                cash_yield_cycle=.01 * i, annual_earnings_yield=.02 * i)
                            for i, day in enumerate(days, 1)])
     panel = values[values.session == days[3]].copy()
     result = history_readiness(panel, [days[3]], window=4, valuation_history=values)
@@ -131,7 +131,7 @@ def test_basket_uses_older_membership_and_does_not_reweight_away_missing_returns
 
 def test_history_counts_consume_missing_calendar_sessions_and_do_not_count_future():
     days = [date(2024, 4, 1), date(2024, 4, 2), date(2024, 4, 3)]
-    panel = pd.DataFrame([dict(session=day, instrument_id="BANK", book_to_price=2., cash_yield365=.06,
+    panel = pd.DataFrame([dict(session=day, instrument_id="BANK", book_to_price=2., cash_yield_cycle=.06,
                                annual_earnings_yield=.1) for day in (days[0], days[2])])
     result = history_readiness(panel, days, window=2)
     assert result.pb_history_count.tolist() == [1, 1]
@@ -158,7 +158,7 @@ def test_benchmark_missing_day_is_preserved_and_breaks_return_window():
 
 
 def test_gap_queue_distinguishes_unknown_anchor_from_insufficient_history():
-    common = dict(session=date(2025, 12, 31), cash_yield365=.05, yield_history_count=756,
+    common = dict(session=date(2025, 12, 31), cash_yield_cycle=.05, yield_history_count=756,
                   annual_earnings_yield=.1, earnings_history_count=756, bank_total_return_index=100,
                   segment_observations=200, quality_gate=1, nim_change=0, profit_growth=0,
                   npl_improvement=0, provision_change_yoy=0, cet1_change_yoy=0)
@@ -179,7 +179,7 @@ def test_daily_pb_uses_pre_display_history_without_changing_ordinary_equity_or_f
     assert latest.pb_history_count == 3 and latest.pb_percentile == pytest.approx(5 / 6)
     assert days[3] not in result.session.tolist()
     display = pd.DataFrame([dict(session=days[2], instrument_id="BANK", book_to_price=None,
-                                 cash_yield365=.05, annual_earnings_yield=.1)])
+                                 cash_yield_cycle=.05, annual_earnings_yield=.1)])
     combined = history_readiness(display, [days[2]], 3, source, 2)
     assert combined.pb_daily.iloc[0] == 3 and pd.isna(combined.book_to_price.iloc[0])
     assert combined.pb_history_count.iloc[0] == 3
