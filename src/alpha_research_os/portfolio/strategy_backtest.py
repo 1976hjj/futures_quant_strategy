@@ -956,6 +956,7 @@ def run_backtest(
     shadow_source_override: dict[str, Any] | None = None,
     calendar_signal_sessions: set[date] | None = None,
     position_weighting: Literal["EQUAL", "INVERSE_RESVOL"] = "EQUAL",
+    risk_weight_cap: float = 0.15,
     constant_exposure: float | None = None,
     conservative_delisting: bool = False,
 ) -> dict[str, Any]:
@@ -963,6 +964,8 @@ def run_backtest(
         raise ValueError("constant exposure must be between zero and one")
     if position_weighting not in ("EQUAL", "INVERSE_RESVOL"):
         raise ValueError("unsupported position weighting")
+    if not math.isfinite(risk_weight_cap) or not 0 < risk_weight_cap <= 1:
+        raise ValueError("risk weight cap must be finite and between zero and one")
     checked = preflight(project_root, request)
     resolved = _resolve_inputs(project_root, request)
     request = _effective_request(request, resolved)
@@ -998,6 +1001,7 @@ def run_backtest(
             missing_industry_policy=missing_industry_policy,
             calendar_signal_sessions=calendar_signal_sessions,
             position_weighting=position_weighting,
+            risk_weight_cap=risk_weight_cap,
             conservative_delisting=conservative_delisting,
         )
     execution = DailyBarExecutionSpec(
@@ -1497,7 +1501,7 @@ def run_backtest(
                         pending_target = inverse_risk_weights({
                             item["ts_code"]: item["factor_values"].get("jqdata-resvol")
                             for item in selected_holdings
-                        })
+                        }, cap=risk_weight_cap)
                 else:
                     position_values = {
                         code: quantity * last_marks.get(code, 0.0)

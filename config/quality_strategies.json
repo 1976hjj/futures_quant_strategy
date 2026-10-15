@@ -496,6 +496,124 @@
         }
       ],
       "information_clock": "POSTCLOSE_END_OF_DAY"
+    },
+    {
+      "strategy_id": "factor-sharpe-quarter5",
+      "version": 1,
+      "category": "FACTOR_WEIGHTED",
+      "name": "历史夏普加权 · 季度5股",
+      "notes": "季度末选股，前20名保留；按残余波动率倒数分配，股票预算内单股上限30%（10股版15%的同比调整）。名义股票目标88.2%，不启用影子择时。",
+      "status": "RESEARCH_CANDIDATE",
+      "schedule": "QUARTER",
+      "allocation": "INVERSE_RESVOL",
+      "fixed_exposure": 0.9,
+      "source_path": "reports/factor_score_research/20261014-quarter10-loss-diagnostics-v2/filters-canonical-v1/runs/QLOSS_BASE.json",
+      "source_sha256": "0f774d5effd793a880d15b11b386f962d56cb0204a54448f68b8e409b7b4ec0a",
+      "request": {
+        "schema_version": "1",
+        "name": "SHARPE_QUARTER5_INV90_CAP30",
+        "start": "2016-01-01",
+        "end": "2026-10-14",
+        "universe_id": "ALL-A-PIT",
+        "universe_segments": [
+          "SH_MAIN",
+          "SZ_MAIN",
+          "CHINEXT",
+          "STAR"
+        ],
+        "selection_sequence_mode": "ACTUAL_POSITIONS",
+        "score_rules": [
+          {
+            "factor_id": "jqdata-share-turnover-monthly",
+            "release_id": "sha256:314f31c2a3029977172892aeea94164bf933a712a3644213dae9b5d3a3ce5d27",
+            "direction": "LOW",
+            "weight": 0.8401716113791217,
+            "transform": "PERCENTILE"
+          },
+          {
+            "factor_id": "jqdata-nonlinear-size",
+            "release_id": "sha256:119a41c94a54ba03a1c1f32a893e19b282c708c0c93f87f82864aa8cff88ffcb",
+            "direction": "HIGH",
+            "weight": 0.7097816976760001,
+            "transform": "PERCENTILE"
+          },
+          {
+            "factor_id": "jqdata-dividend-yield-ttm",
+            "release_id": "sha256:9e162b404e812348cf3b5d335d09585edead497b824bad01dfea77d68abf3758",
+            "direction": "HIGH",
+            "weight": 0.5995525638610454,
+            "transform": "PERCENTILE"
+          },
+          {
+            "factor_id": "jqdata-resvol",
+            "release_id": "sha256:adf0c70b2e856c6280f7324826fed977e177537ce7e74f45204126ceabb4c662",
+            "direction": "LOW",
+            "weight": 0.4786201017413729,
+            "transform": "PERCENTILE"
+          },
+          {
+            "factor_id": "jqdata-book-to-price-ratio",
+            "release_id": "sha256:66d6123af6dddab3be002bd84d0880d0d74e723d18d9ccd7ccd4f177a20aa20f",
+            "direction": "HIGH",
+            "weight": 0.465910093646075,
+            "transform": "PERCENTILE"
+          },
+          {
+            "factor_id": "jqdata-natural-log-of-market-cap",
+            "release_id": "sha256:32e3183a205b3de8e7f4101491fa126e3b1daf4a88d0379c9bb0addc0bc93f5f",
+            "direction": "LOW",
+            "weight": 0.4046888276570272,
+            "transform": "PERCENTILE"
+          },
+          {
+            "factor_id": "jqdata-gross-margin-ttm",
+            "release_id": "sha256:2b9f8532e330d36756f043d0edb30a1c6f5dbc0d3a1ce756ef62df37c13d087a",
+            "direction": "HIGH",
+            "weight": 0.2959350566877177,
+            "transform": "PERCENTILE"
+          }
+        ],
+        "filter_rules": [],
+        "exclude_st": true,
+        "exclude_abnormal_status": true,
+        "minimum_listed_sessions": 120,
+        "target_count": 5,
+        "retention_rank": 20,
+        "rebalance_sessions": 63,
+        "initial_cash_cny": 1000000.0,
+        "minimum_cash_fraction": 0.02,
+        "buy_commission_bps": 2.0,
+        "sell_commission_bps": 2.0,
+        "sell_stamp_duty_bps": 5.0,
+        "historical_sell_stamp_duty_bps": 10.0,
+        "minimum_commission_cny": 5.0,
+        "transfer_fee_bps": 0.1,
+        "historical_transfer_fee_bps": 0.2,
+        "base_slippage_bps": 2.0,
+        "square_root_impact_bps": 20.0,
+        "maximum_slippage_bps": 100.0,
+        "maximum_participation_rate": 0.1,
+        "shadow_health": {
+          "experiment_variant": "S4V3",
+          "drawdown_peak_lookback_sessions": 252,
+          "external_trend_sessions": 200,
+          "external_breadth_return_sessions": 20,
+          "external_strong_breadth": 0.6,
+          "external_weak_breadth": 0.35,
+          "regime_ordinary_drawdown": 0.08,
+          "regime_severe_drawdown": 0.15,
+          "regime_base_exposure": 0.5,
+          "regime_weak_exposure": 0.3,
+          "regime_strong_exposure": 1.0,
+          "regime_down_confirmation_sessions": 2,
+          "regime_up_confirmation_sessions": 5
+        }
+      },
+      "evidence_version": "PARENT_RULE_REFERENCE",
+      "related_evidence": [],
+      "risk_weight_cap": 0.3,
+      "parent_strategy_id": "factor-sharpe-quarter10",
+      "source_evidence_role": "PARENT_RULE_REFERENCE"
     }
   ]
 }

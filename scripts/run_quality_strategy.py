@@ -96,7 +96,10 @@ def run(root: Path, jid: str):
     engine._signal_cache_path = lambda *args: None
     if definition["category"] == "FACTOR_WEIGHTED":
         engine.build_external_market_frame = non_bse_external
-    result = engine.run_backtest(root, request, progress_callback=progress, include_selection_history=True, calendar_signal_sessions=schedule, position_weighting=definition["allocation"], constant_exposure=definition.get("fixed_exposure"), conservative_delisting=definition["category"] == "FACTOR_WEIGHTED")
+    risk_weight_cap = float(definition.get("risk_weight_cap", .15))
+    result = engine.run_backtest(root, request, progress_callback=progress, include_selection_history=True, calendar_signal_sessions=schedule, position_weighting=definition["allocation"], risk_weight_cap=risk_weight_cap, constant_exposure=definition.get("fixed_exposure"), conservative_delisting=definition["category"] == "FACTOR_WEIGHTED")
+    result["allocation_policy"] = {"method": definition["allocation"], "risk_weight_cap": risk_weight_cap,
+                                  "cap_basis": "STOCK_ALLOCATION_BUDGET_BEFORE_EXPOSURE"}
     if result.get("status") != "PASS":
         raise ValueError("模型参考账户复算未通过")
     atomic_json(folder / f"{jid}.backtest.json", result)
@@ -123,7 +126,7 @@ def run(root: Path, jid: str):
     if stock_signal:
         holdings = latest_selection["holdings"]
         from alpha_research_os.portfolio.quality_strategies import inverse_risk_weights
-        weights = inverse_risk_weights({h["ts_code"]: h["factor_values"]["jqdata-resvol"] for h in holdings}) if definition["allocation"] == "INVERSE_RESVOL" else {h["ts_code"]: 1 / len(holdings) for h in holdings}
+        weights = inverse_risk_weights({h["ts_code"]: h["factor_values"]["jqdata-resvol"] for h in holdings}, cap=risk_weight_cap) if definition["allocation"] == "INVERSE_RESVOL" else {h["ts_code"]: 1 / len(holdings) for h in holdings}
     else:
         total = sum(p["market_value_cny"] for p in positions)
         weights = {p["ts_code"]: p["market_value_cny"] / total for p in positions} if total else {}

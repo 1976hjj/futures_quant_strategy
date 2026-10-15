@@ -217,6 +217,34 @@ def test_short_risk_list_keeps_unused_budget_in_cash():
         inverse_risk_weights({"a": 0})
 
 
+def test_five_stock_explicit_cap_keeps_full_budget_and_risk_differences():
+    risks = {"a": 1., "b": 2., "c": 3., "d": 4., "e": 5.}
+    weights = inverse_risk_weights(risks, cap=.30)
+    assert sum(weights.values()) == pytest.approx(1)
+    assert max(weights.values()) <= .30 + 1e-12
+    assert weights['a'] > weights['e']
+    assert sum(weights.values()) * .9 * .98 == pytest.approx(.882)
+    # The existing 15% policy is unchanged when no override is supplied.
+    assert sum(inverse_risk_weights(risks).values()) == pytest.approx(.75)
+
+
+def test_parent_rule_reference_never_displays_parent_performance_as_variant(tmp_path):
+    atomic_json(tmp_path / 'reports/strategy_backtests/parent.result.json', result())
+    book = QualityStrategyBook(tmp_path)
+    saved = book.register({'job_id': 'parent', 'category': 'FACTOR_WEIGHTED', 'name': 'variant'})
+    definition_path = book.store / 'definitions' / f"{saved['strategy_id']}.json"
+    definition = json.loads(definition_path.read_bytes())
+    definition['source_evidence_role'] = 'PARENT_RULE_REFERENCE'
+    definition['request']['target_count'] = 5
+    atomic_json(definition_path, definition)
+    variant = book.detail(saved['strategy_id'])
+    assert variant['target_count'] == 5
+    assert variant['summary'] == {}
+    assert variant['daily'] == []
+    assert variant['annual'] == []
+    assert variant['signal'] is None
+
+
 @pytest.mark.parametrize("payload", [
     {"capital_cny": float("inf")}, {"capital_cny": -1},
     {"current_holdings": [{"ts_code": "830001.BJ", "quantity": 100}]},

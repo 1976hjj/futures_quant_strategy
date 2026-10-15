@@ -281,7 +281,8 @@ class QualityStrategyBook:
             error = None
         except (OSError, ValueError, KeyError) as exc:
             source, error = {}, str(exc)
-        summary = source.get("summary") or source.get("result_summary") or {}
+        parent_reference = definition.get("source_evidence_role") == "PARENT_RULE_REFERENCE"
+        summary = {} if parent_reference else source.get("summary") or source.get("result_summary") or {}
         item = {k: definition.get(k) for k in ["strategy_id", "version", "category", "name", "notes", "status", "schedule", "allocation", "fixed_exposure", "evidence_version", "information_clock"]}
         item.update(summary=summary, start=definition["request"]["start"], end=definition["request"]["end"], target_count=definition["request"]["target_count"], rebalance_sessions=definition["request"]["rebalance_sessions"], evidence_error=error, latest_job=self.latest_job(definition["strategy_id"]))
         job = item["latest_job"]
@@ -309,7 +310,9 @@ class QualityStrategyBook:
             settings = self.root / "config/bank_timing_data.json"
             item["released_input_end"] = read_json(settings)["released_feature_end"] if settings.exists() else None
         if detail:
-            archived = chart_history(source)
+            # A new variant may inherit a parent's rules as its provenance, but
+            # must never label the parent's performance as this variant's own.
+            archived = chart_history({} if parent_reference else source)
             item.update(request=definition["request"], annual=archived["annual"], daily=archived["daily"], initial_cash_cny=archived["initial_cash_cny"], related_evidence=[])
             for index, evidence in enumerate(definition.get("related_evidence", [])):
                 path = (self.root / evidence["path"]).resolve()
