@@ -128,7 +128,7 @@ def publish(root: Path, run_dir: Path, rows: list[dict[str, Any]], summary: dict
 
 
 def sync(root: Path, end: date, *, workers: int = 2, min_free_gb: float = 10,
-         progress_path: Path | None = None) -> dict[str, Any]:
+         progress_path: Path | None = None, progress_callback=None) -> dict[str, Any]:
     if end > date.today():
         raise ValueError("bank disclosure cutoff cannot be in the future")
     if shutil.disk_usage(root).free < min_free_gb * 1024 ** 3:
@@ -154,6 +154,8 @@ def sync(root: Path, end: date, *, workers: int = 2, min_free_gb: float = 10,
                 errors.append({"code": bank["code"], "error": str(error)})
                 print(f"BANK {bank['code']} FAIL: {error}", flush=True)
             completed += 1
+            if progress_callback is not None:
+                progress_callback(completed, len(banks), f"{bank['name']} {bank['code']} · 已采集 {completed}/{len(banks)} 家；待补充源核验发布")
             if progress_path is not None:
                 atomic_json(progress_path, {"status": "RUNNING", "group": "bank_free",
                             "phase": f"免费银行财报：{completed}/{len(banks)}家已采集",

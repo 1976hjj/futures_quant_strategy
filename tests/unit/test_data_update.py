@@ -59,6 +59,28 @@ def test_data_job_status_survives_manager_recreation(tmp_path) -> None:
     assert restored["log_tail"] == "updated market"
 
 
+def test_bank_progress_keeps_stage_counts_when_parent_finishes(tmp_path):
+    path = tmp_path / "progress.json"
+    data_update._status(path, status="RUNNING", started_at="2026-10-15T00:00:00+08:00",
+                        progress=99, stage_id="publish", stage_completed=13, stage_total=13,
+                        stages=[{"id": "publish", "status": "RUNNING"}])
+    data_update._status(path, status="PASS", progress=100, phase="更新完成")
+    saved = json.loads(path.read_bytes())
+    assert saved["stage_completed"] == 13
+    assert saved["stages"][0]["status"] == "DONE"
+    assert saved["started_at"] == "2026-10-15T00:00:00+08:00"
+
+
+def test_old_windows_bank_log_names_are_read_without_replacement_characters(tmp_path):
+    manager = DataUpdateManager(tmp_path)
+    paths = manager._paths("20261014-235537-abcdef")
+    paths["request.json"].write_text('{}')
+    paths["progress.json"].write_text('{"status":"PASS"}')
+    paths["log"].write_bytes("BANK 600036.SH 招商银行: 102 reports\n".encode("gb18030"))
+    assert "招商银行" in manager.status("20261014-235537-abcdef")["log_tail"]
+    assert "�" not in manager.status("20261014-235537-abcdef")["log_tail"]
+
+
 def test_data_update_uses_existing_archive_endpoint(tmp_path) -> None:
     archive = tmp_path / "data" / "tushare_reference_archive"
     archive.mkdir(parents=True)

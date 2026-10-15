@@ -954,7 +954,15 @@ def run_backtest(
     maximum_industry_weight: float | None = None,
     missing_industry_policy: Literal["UNKNOWN_BUCKET", "EXCLUDE"] = "UNKNOWN_BUCKET",
     shadow_source_override: dict[str, Any] | None = None,
+    calendar_signal_sessions: set[date] | None = None,
+    position_weighting: Literal["EQUAL", "INVERSE_RESVOL"] = "EQUAL",
+    constant_exposure: float | None = None,
+    conservative_delisting: bool = False,
 ) -> dict[str, Any]:
+    if constant_exposure is not None and not 0 <= constant_exposure <= 1:
+        raise ValueError("constant exposure must be between zero and one")
+    if position_weighting not in ("EQUAL", "INVERSE_RESVOL"):
+        raise ValueError("unsupported position weighting")
     checked = preflight(project_root, request)
     resolved = _resolve_inputs(project_root, request)
     request = _effective_request(request, resolved)
@@ -988,6 +996,9 @@ def run_backtest(
             include_selection_history=False,
             maximum_industry_weight=maximum_industry_weight,
             missing_industry_policy=missing_industry_policy,
+            calendar_signal_sessions=calendar_signal_sessions,
+            position_weighting=position_weighting,
+            conservative_delisting=conservative_delisting,
         )
     execution = DailyBarExecutionSpec(
         buy_commission_bps=request.buy_commission_bps,
@@ -1044,9 +1055,12 @@ def run_backtest(
                 change["execution_session"] = (
                     execution_session.isoformat() if execution_session is not None else None
                 )
+        if constant_exposure is not None:
+            initial_shadow_exposure, shadow_schedule, shadow_changes = constant_exposure, {}, []
         selection_signal_sessions = (
             set(target_schedule)
             if target_schedule is not None
+            else set(calendar_signal_sessions) if calendar_signal_sessions is not None
             else set(sessions[:: request.rebalance_sessions])
         )
         shadow_signal_sessions = set(shadow_schedule)
@@ -1365,7 +1379,7 @@ def run_backtest(
                     # position at the final observable close instead of carrying an
                     # untradeable security forever at a stale mark.  The explicit
                     # execution reason keeps this accounting assumption auditable.
-                    liquidation_price = close_price or last_marks.get(code, 0.0)
+                    liquidation_price = 0.0 if conservative_delisting else close_price or last_marks.get(code, 0.0)
                     proceeds = _cash(quantity * liquidation_price)
                     allocated_cost = position_costs.get(code, 0.0)
                     allocated_dividend = position_dividends.get(code, 0.0)
@@ -1395,7 +1409,7 @@ def run_backtest(
                             "post_quantity": 0,
                             "post_average_cost_price": None,
                             "execution_reason": (
-                                "DELISTING_LIQUIDATION"
+                                "DELISTING_LIQUIDATION_FULL_LOSS" if conservative_delisting else "DELISTING_LIQUIDATION"
                                 if close_price > 0
                                 else "DELISTING_LIQUIDATION_LAST_MARK"
                             ),
@@ -1435,6 +1449,12 @@ def run_backtest(
                     "actual_stock_exposure": closing_value / nav if nav else 0.0,
                 }
             )
+            if include_selection_history:
+                daily[-1]["holdings"] = [
+                    {"ts_code": code, "quantity": quantity, "close": last_marks.get(code),
+                     "market_value_cny": quantity * last_marks.get(code, 0.0)}
+                    for code, quantity in sorted(positions.items()) if quantity > 0
+                ]
 
             if session in signal_sessions and session != sessions[-1]:
                 pending_shadow_exposure = shadow_schedule.get(session)
@@ -1472,6 +1492,12 @@ def run_backtest(
                     pending_target = {
                         item["ts_code"]: 1 / count for item in selected_holdings
                     } if count else {}
+                    if count and position_weighting == "INVERSE_RESVOL":
+                        from alpha_research_os.portfolio.quality_strategies import inverse_risk_weights
+                        pending_target = inverse_risk_weights({
+                            item["ts_code"]: item["factor_values"].get("jqdata-resvol")
+                            for item in selected_holdings
+                        })
                 else:
                     position_values = {
                         code: quantity * last_marks.get(code, 0.0)
@@ -1681,4 +1707,9 @@ def run_backtest(
         )
     if include_selection_history:
         result["selection_history"] = selection_history
+        result["latest_positions"] = [
+            {"ts_code": code, "quantity": quantity, "close": last_marks.get(code),
+             "market_value_cny": quantity * last_marks.get(code, 0.0)}
+            for code, quantity in sorted(positions.items()) if quantity > 0
+        ]
     return result

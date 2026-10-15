@@ -79,8 +79,10 @@ def test_sync_publishes_versions_and_failed_fetch_keeps_pointer(monkeypatch, tmp
         def json(self):
             return self.payload
 
+    api_calls = []
     def fetch(*_, **kwargs):
         api = kwargs["json"]["api_name"]
+        api_calls.append(api)
         if api in module.APIS[:3]:
             data = {"ts_code": "600036.SH", "trade_date": "20260630", "close": 10.0}
         else:
@@ -95,7 +97,28 @@ def test_sync_publishes_versions_and_failed_fetch_keeps_pointer(monkeypatch, tmp
         return Response({"code": 0, "data": {"fields": list(data), "items": [list(data.values())]}})
 
     monkeypatch.setattr(module.requests, "post", fetch)
-    summary = module.sync(tmp_path, date(2026, 9, 1), 2, 1)
+    progress_path = tmp_path / "progress.json"
+    progress_path.write_text(json.dumps({"status": "RUNNING", "completed_groups": 0, "total_groups": 1}))
+    snapshots = []
+    report = module.BankSyncProgress.report
+
+    def tracked_report(self, *args, **kwargs):
+        report(self, *args, **kwargs)
+        snapshots.append(json.loads(progress_path.read_bytes()))
+
+    monkeypatch.setattr(module.BankSyncProgress, "report", tracked_report)
+    summary = module.sync(tmp_path, date(2026, 9, 1), 2, 1, progress_path)
+    assert {s["stage_id"] for s in snapshots} == {s[0] for s in module.PROGRESS_STAGES}
+    token_done = [s for s in snapshots if s["stage_id"] == "token"][-1]
+    assert token_done["stage_completed"] == len(module.APIS)
+    assert token_done["stage_total"] == len(module.APIS)
+    final = snapshots[-1]
+    assert final["progress"] == 99
+    assert final["status"] == "RUNNING"  # Parent alone declares completion.
+    assert final["stage_id"] == "publish"
+    assert all(s["status"] == "DONE" for s in final["stages"][:-1])
+    assert final["stage_completed"] == final["stage_total"]
+    assert "新版本" in final["detail"]
     pointer = (warehouse / "bank_token_summary.json").read_bytes()
     with duckdb.connect(str(warehouse / "bank_token.duckdb"), read_only=True) as conn:
         assert conn.execute(
@@ -103,11 +126,46 @@ def test_sync_publishes_versions_and_failed_fetch_keeps_pointer(monkeypatch, tmp
         ).fetchone() == (10.0, "tushare_compatible_token")
         assert conn.execute("select count(*) from daily_complete").fetchone()[0] == 1
     assert summary["groups"]["market"]["banks"] == 1
+    original_financial_at = summary["groups"]["financial"]["collected_at"]
+    with duckdb.connect(str(warehouse / "bank_token.duckdb"), read_only=True) as conn:
+        original_lineage = conn.execute("SELECT * FROM bank_metric_lineage ORDER BY code,report_date,metric").df()
+    api_calls.clear()
+    monkeypatch.setattr(sync_eastmoney_banks, "sync", lambda *a, **kw: pytest.fail("AUTO must reuse a recent free source"))
+    daily = module.sync(tmp_path, date(2026, 9, 1), 2, 1, progress_path, "AUTO")
+    assert sorted(api_calls) == sorted(module.APIS[:3])
+    assert not daily["financial_refreshed"]
+    assert daily["groups"]["financial"]["collected_at"] == original_financial_at
+    assert daily["reused_financial_run_id"] == summary["run_id"]
+    with duckdb.connect(str(warehouse / "bank_token.duckdb"), read_only=True) as conn:
+        reused_lineage = conn.execute("SELECT * FROM bank_metric_lineage ORDER BY code,report_date,metric").df()
+    pd.testing.assert_frame_equal(original_lineage, reused_lineage)
+    assert (tmp_path / "data/tushare_bank_archive" / daily["run_id"] / "manifest.json").exists()
+    pointer = (warehouse / "bank_token_summary.json").read_bytes()
     monkeypatch.setattr(module.requests, "post", lambda *_, **__: Response({"code": -1}))
     monkeypatch.setattr(module.time, "sleep", lambda _: None)
     with pytest.raises(ValueError, match="source error"):
         module.sync(tmp_path, date(2026, 9, 1), 2, 1)
     assert (warehouse / "bank_token_summary.json").read_bytes() == pointer
+
+
+def test_bank_refresh_policy_uses_real_financial_collection_not_latest_market_update(tmp_path):
+    import json
+    from datetime import UTC, datetime, timedelta
+    from scripts.sync_bank_industry import bank_refresh_policy
+    root = tmp_path / "data/warehouse"
+    root.mkdir(parents=True)
+    (root / "bank_token.duckdb").touch()
+    now = datetime(2026, 10, 15, tzinfo=UTC)
+    def save(days):
+        (root / "bank_token_summary.json").write_text(json.dumps({"groups": {
+            "financial": {"collected_at": (now - timedelta(days=days)).isoformat()},
+            "market": {"collected_at": now.isoformat()},
+        }}))
+    save(1)
+    assert not bank_refresh_policy(tmp_path, "AUTO", now)["refresh_financial"]
+    assert bank_refresh_policy(tmp_path, "FULL", now)["refresh_financial"]
+    save(7)
+    assert bank_refresh_policy(tmp_path, "AUTO", now)["refresh_financial"]
 
 
 def test_mixed_pdf_lineage_and_units_are_explicit():

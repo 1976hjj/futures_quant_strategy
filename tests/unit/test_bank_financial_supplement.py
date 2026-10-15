@@ -5,6 +5,45 @@ import pytest
 from scripts.supplement_bank_financial_facts import extract_cell, supplement
 
 
+def test_wrapped_parenthesized_footnote_and_roe_qualifier():
+    pages = ['项目 2025年 2024年\n加权平均净资产收益率\n(1) 12.68 11.51\n'
+             '基本每股收益\n(1) 0.85 0.69']
+    assert extract_cell(pages, 2025, 'roe_weighted', 12.68)['value'] == 12.68
+    assert extract_cell(pages, 2025, 'ordinary_eps_basic', .85)['value'] == .85
+    pages = ['项目 2025年 2024年\n加权平均净资产收益率(ROAE)(2) 9.39% 9.79% (0.40)']
+    assert extract_cell(pages, 2025, 'roe_weighted', 9.39)['previous_value'] == 9.79
+
+
+def test_numbered_reference_column_requires_header_and_definition():
+    pages = ['注释 2025年 2024年\n不良贷款率(%) 16 1.23 1.25',
+             '注释\n16 不良贷款率＝不良贷款余额÷贷款总额']
+    assert extract_cell(pages, 2025, 'npl_ratio', 1.23)['value'] == 1.23
+    pages[0] = pages[0].replace('注释', '项目')
+    assert extract_cell(pages, 2025, 'npl_ratio', 1.23) is None
+
+
+def test_generic_roe_requires_weighted_definition_and_review():
+    pages = ['2025年度报告\n注释 2025年 2024年\n净资产收益率(%) 11 8.94 9.50',
+             '注释\n11 净资产收益率＝普通股净利润÷普通股权益加权平均余额×100%']
+    assert extract_cell(pages, 2025, 'roe_weighted', 8.94) is None
+    assert extract_cell(pages, 2025, 'roe_weighted', 8.94, reviewed_pages=(1,))['value'] == 8.94
+    pages[1] = pages[1].replace('加权平均', '期末')
+    assert extract_cell(pages, 2025, 'roe_weighted', 8.94, reviewed_pages=(1,)) is None
+
+
+def test_image_cover_review_is_year_bound_and_only_uses_reviewed_page():
+    pages = ['扫描封面', '报告期末 上年末\n项目 本集团 本行 本集团 本行\n核心一级资本充足率(%) 8.99 8.94 8.92 8.49']
+    assert extract_cell(pages, 2025, 'cet1_ratio', 8.99, (2,)) is None
+    assert extract_cell(pages, 2025, 'cet1_ratio', 8.99, (2,), 2024) is None
+    assert extract_cell(pages, 2025, 'cet1_ratio', 8.99, (2,), 2025)['value'] == 8.99
+    assert extract_cell(pages, 2025, 'cet1_ratio', 8.99, (1,), 2025) is None
+
+
+def test_explicit_yuan_profit_unit():
+    pages = ['单位：人民币元\n项目 2025年 2024年\n归属于上市公司股东的净利润 1,978,974,061.72 1,878,563,242.92']
+    assert extract_cell(pages, 2025, 'parent_profit', 1978974061.72)['original_display_unit_factor'] == 1
+
+
 def test_combined_basic_eps_and_previous_page_header():
     pages = ['项目 2024年 2023年 2022年\n营业收入 100 90 80',
              '2024年年度报告\n基本/稀释每股收益 2.15 2.25 2.20\n'

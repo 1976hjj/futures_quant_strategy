@@ -77,16 +77,33 @@ def logical_lines(text):
     return result
 
 
-def extract_cell(pages, year, metric, expected, reviewed_pages=()):
+def clean_cell_tail(tail):
+    """Remove label typography again after joining a wrapped numeric row."""
+    tail = re.sub(r'^\s*\([A-Za-z]+\)', '', tail)
+    tail = re.sub(r'^\s*\(%\)', '', tail)
+    # An integer in parentheses before further cells is a label footnote.
+    # Parenthesized decimal changes/negative amounts are not stripped.
+    tail = re.sub(r'^\s*\(\d{1,2}(?:,\d{1,2})*\)(?=\s+(?:-?\d|$))', '', tail)
+    return tail
+
+
+def extract_cell(pages, year, metric, expected, reviewed_pages=(), reviewed_report_year=None):
     """Return only a first current-year table cell matching an independent candidate."""
     if expected is None or not np.isfinite(expected):
         return None
     matches = []
     for no, text in enumerate(pages, 1):
+        if reviewed_pages and no not in reviewed_pages:
+            continue
         lines = logical_lines(text)
         nearby = "\n".join(pages[max(0, no - 2):no + 1])
         for j, line in enumerate(lines):
             match = re.search(PATTERNS[metric], line)
+            # Some reports define weighted ROE in a numbered note rather than
+            # in the row label. Require both explicit definition and page review.
+            if (match is None and metric == 'roe_weighted' and no in reviewed_pages
+                    and re.search(r'净资产收益率[^\n]*＝[^\n]*权益加权平均', nearby)):
+                match = re.search(r'净资产收益率', line)
             if not match or re.search(r"扣除非经常|扣非", line):
                 continue
             preceding = logical_lines(pages[no - 2])[-60:] if no > 1 else []
@@ -102,12 +119,13 @@ def extract_cell(pages, year, metric, expected, reviewed_pages=()):
                 and re.search(r'项目\s*本集团\s*本行\s*本集团\s*本行', before + line[:match.start()])
             )
             reviewed_header = (no in reviewed_pages and
-                               re.search(rf'(?:{year}\s*(?:年年度报告|年度报告|年年报|年报)'
+                               (reviewed_report_year == year or re.search(rf'(?:{year}\s*(?:年年度报告|年度报告|年年报|年报)'
                                          rf'|公司\s*{year}\s*年度分别按照)',
-                                         text + '\n' + '\n'.join(pages[:3])))
+                                         text + '\n' + '\n'.join(pages[:3]))))
             if not current_header(before, year) and not single_margin and not relative_capital and not reviewed_header:
                 continue
             tail = line[match.end():]
+            tail = clean_cell_tail(tail)
             # Footnote markers are typography, not numeric financial cells.
             tail = re.sub(r"^\s*[（(]\d+(?:[,，]\d+)*[）)]", "", tail)
             if re.match(r"^\d{1,2}(?![\d.])", tail):
@@ -123,6 +141,7 @@ def extract_cell(pages, year, metric, expected, reviewed_pages=()):
                 if re.fullmatch(r"[（(]\d+[）)]", following):
                     continue
                 tail += " " + following
+                tail = clean_cell_tail(tail)
             tail = re.sub(r"^[\s（(]*[%％]?[）)]?\s*[≤≥<>]\s*\d+(?:\.\d+)?", "", tail)
             tail = re.sub(r"^[\s（(]*[%％][）)]?", "", tail)
             values = numbers(tail)
@@ -130,7 +149,9 @@ def extract_cell(pages, year, metric, expected, reviewed_pages=()):
                 continue
             marker = re.match(r"^\s*(\d{1,2})(?![\d.])\s+", tail)
             if (marker and values[0] == int(marker[1]) and len(values) > 2
-                    and re.search(r"(?:^|\n)\s*" + marker[1] + r"\s*[、.．]\s*\S", nearby)):
+                    and (re.search(r"(?:^|\n)\s*" + marker[1] + r"\s*[、.．]\s*\S", nearby)
+                         or ('注释' in before and re.search(
+                             r"(?:^|\n)\s*" + marker[1] + r"\s+\S", nearby)))):
                 values = values[1:]
             prefix = re.split(r"\d", tail, maxsplit=1)[0]
             if re.search(r"同比|下降|增长|提高|个百分点|保持", prefix):
@@ -145,6 +166,8 @@ def extract_cell(pages, year, metric, expected, reviewed_pages=()):
                 factors = [scale for scale, unit in ((1e6, "百万元"), (1e3, "千元"),
                            (1e4, "万元"), (1e8, "亿元"), (1.0, "单位：元"))
                            if unit in text[:2500] or unit in context]
+                if re.search(r'单位[:：]\s*人民币元(?:\s|$)', text):
+                    factors.append(1.0)
             scales = [scale for scale in factors
                       if abs(values[0] * scale - expected) <=
                       (max(scale * .51, abs(expected) * .00001)
@@ -269,8 +292,12 @@ def supplement(root, collection, end, ocr_requests=(), codes=(), reviewed_cells=
                            and item['year'] == year and item['metric'] == metric), None)
             if review and review['source_sha256'] != document['sha256']:
                 raise ValueError('人工复核记录与原始年报哈希不一致')
+            reviewed_year = review.get('report_year') if review else None
+            if reviewed_year is not None and (reviewed_year != year or not re.search(
+                    str(year) + r'年?年度报告', document['title'].replace(' ', ''))):
+                raise ValueError('人工复核报告年度与官方索引不一致')
             found = extract_cell(pages, year, metric, review['value'] if review else expected,
-                                 (review['pdf_page'],) if review else ())
+                                 (review['pdf_page'],) if review else (), reviewed_year)
             if review and found is not None and found['pdf_page'] != review['pdf_page']:
                 found = None
             if found is None:

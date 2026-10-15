@@ -1,0 +1,501 @@
+{
+  "schema_version": 1,
+  "categories": [
+    {
+      "id": "SMALL_CAP",
+      "name": "小市值"
+    },
+    {
+      "id": "BANK",
+      "name": "银行"
+    },
+    {
+      "id": "FACTOR_WEIGHTED",
+      "name": "因子加权"
+    }
+  ],
+  "strategies": [
+    {
+      "strategy_id": "smallcap-shadow5",
+      "version": 1,
+      "category": "SMALL_CAP",
+      "name": "小市值质量＋影子 · 5股",
+      "notes": "小市值与净利润现金含量等权排序，S4-V3影子控制仓位。2016—2019表现较弱，不能仅凭近年收益判断稳定。",
+      "status": "RESEARCH_CANDIDATE",
+      "schedule": "INTERVAL",
+      "allocation": "EQUAL",
+      "fixed_exposure": null,
+      "source_path": "reports/strategy_backtests/20260922-125408-e2abfc.result.json",
+      "source_sha256": "45b310a73fc3ed94729154b09f2393491715ba2af0a2ce6f44842bd1b37425e7",
+      "request": {
+        "base_slippage_bps": 2.0,
+        "buy_commission_bps": 2.0,
+        "end": "2026-09-21",
+        "exclude_abnormal_status": true,
+        "exclude_st": true,
+        "filter_rules": [],
+        "historical_sell_stamp_duty_bps": 10.0,
+        "historical_transfer_fee_bps": 0.2,
+        "initial_cash_cny": 1000000.0,
+        "maximum_participation_rate": 0.1,
+        "maximum_slippage_bps": 100.0,
+        "minimum_cash_fraction": 0.02,
+        "minimum_commission_cny": 5.0,
+        "minimum_listed_sessions": 120,
+        "name": "2020-2026：S4‑V3",
+        "rebalance_sessions": 5,
+        "retention_rank": 20,
+        "schema_version": "1",
+        "score_rules": [
+          {
+            "direction": "LOW",
+            "factor_id": "jqdata-natural-log-of-market-cap",
+            "release_id": "sha256:682dee6dbc64b4498328c6c2b29822ad09df265de371d5f7259829392611815f",
+            "transform": "PERCENTILE",
+            "weight": 1.0
+          },
+          {
+            "direction": "HIGH",
+            "factor_id": "jqdata-net-operating-cash-flow-coverage",
+            "release_id": "sha256:3fa12b8e7325754e3825936b7377b5340dd238d19a184aac09f13cdbc310aae0",
+            "transform": "PERCENTILE",
+            "weight": 1.0
+          }
+        ],
+        "selection_sequence_mode": "ACTUAL_POSITIONS",
+        "sell_commission_bps": 2.0,
+        "sell_stamp_duty_bps": 5.0,
+        "shadow_health": {
+          "drawdown_peak_lookback_sessions": 252,
+          "experiment_variant": "S4V3",
+          "external_breadth_return_sessions": 20,
+          "external_strong_breadth": 0.6,
+          "external_trend_sessions": 200,
+          "external_weak_breadth": 0.35,
+          "regime_base_exposure": 0.5,
+          "regime_down_confirmation_sessions": 2,
+          "regime_ordinary_drawdown": 0.08,
+          "regime_severe_drawdown": 0.15,
+          "regime_strong_exposure": 1.0,
+          "regime_up_confirmation_sessions": 5,
+          "regime_weak_exposure": 0.3
+        },
+        "square_root_impact_bps": 20.0,
+        "start": "2020-01-06",
+        "target_count": 5,
+        "transfer_fee_bps": 0.1,
+        "universe_id": "ALL-A-PIT",
+        "universe_segments": [
+          "CHINEXT",
+          "SZ_MAIN",
+          "SH_MAIN"
+        ]
+      },
+      "evidence_version": "FROZEN_RESEARCH",
+      "related_evidence": [
+        {
+          "path": "reports/strategy_backtests/20260922-120611-a41c06.result.json",
+          "label": "2016—2019弱势检验",
+          "source_sha256": "455470ceb10e779755e4dccfa1d9ab55be8464f57f4c9f0568a1cebb9ad5dd13"
+        },
+        {
+          "path": "reports/strategy_backtests/20260922-221612-366bc0.result.json",
+          "label": "2010—2015历史结果",
+          "source_sha256": "2bba8682ac76e2d7513f07c25d9acd5473ffd48fb6f021bedb55cff9e090adf7"
+        }
+      ]
+    },
+    {
+      "strategy_id": "factor-sharpe-shadow10",
+      "version": 1,
+      "category": "FACTOR_WEIGHTED",
+      "name": "历史夏普加权＋影子 · 10股",
+      "notes": "七项因子的冻结权重组合，10股等权，S4-V3影子控制仓位。历史夏普用于选权重，旧研究区间已查看，不能当作未见样本。",
+      "status": "RESEARCH_CANDIDATE",
+      "schedule": "INTERVAL",
+      "allocation": "EQUAL",
+      "fixed_exposure": null,
+      "source_path": "reports/factor_score_research/20261014-shadow10-style-comparison-v1/runs/SHARPE_ACTUAL_S4.json",
+      "source_sha256": "f062685e042fbc56224a046edbe88d8265d7a43ff55bf7412beac470005fd022",
+      "request": {
+        "schema_version": "1",
+        "name": "SHARPE_ACTUAL_S4",
+        "start": "2016-01-01",
+        "end": "2026-09-30",
+        "universe_id": "ALL-A-PIT",
+        "universe_segments": [
+          "SH_MAIN",
+          "SZ_MAIN",
+          "CHINEXT",
+          "STAR"
+        ],
+        "selection_sequence_mode": "ACTUAL_POSITIONS",
+        "score_rules": [
+          {
+            "factor_id": "jqdata-share-turnover-monthly",
+            "release_id": "sha256:314f31c2a3029977172892aeea94164bf933a712a3644213dae9b5d3a3ce5d27",
+            "direction": "LOW",
+            "weight": 0.8401716113791217,
+            "transform": "PERCENTILE"
+          },
+          {
+            "factor_id": "jqdata-nonlinear-size",
+            "release_id": "sha256:119a41c94a54ba03a1c1f32a893e19b282c708c0c93f87f82864aa8cff88ffcb",
+            "direction": "HIGH",
+            "weight": 0.7097816976760001,
+            "transform": "PERCENTILE"
+          },
+          {
+            "factor_id": "jqdata-dividend-yield-ttm",
+            "release_id": "sha256:9e162b404e812348cf3b5d335d09585edead497b824bad01dfea77d68abf3758",
+            "direction": "HIGH",
+            "weight": 0.5995525638610454,
+            "transform": "PERCENTILE"
+          },
+          {
+            "factor_id": "jqdata-resvol",
+            "release_id": "sha256:adf0c70b2e856c6280f7324826fed977e177537ce7e74f45204126ceabb4c662",
+            "direction": "LOW",
+            "weight": 0.4786201017413729,
+            "transform": "PERCENTILE"
+          },
+          {
+            "factor_id": "jqdata-book-to-price-ratio",
+            "release_id": "sha256:66d6123af6dddab3be002bd84d0880d0d74e723d18d9ccd7ccd4f177a20aa20f",
+            "direction": "HIGH",
+            "weight": 0.465910093646075,
+            "transform": "PERCENTILE"
+          },
+          {
+            "factor_id": "jqdata-natural-log-of-market-cap",
+            "release_id": "sha256:32e3183a205b3de8e7f4101491fa126e3b1daf4a88d0379c9bb0addc0bc93f5f",
+            "direction": "LOW",
+            "weight": 0.4046888276570272,
+            "transform": "PERCENTILE"
+          },
+          {
+            "factor_id": "jqdata-gross-margin-ttm",
+            "release_id": "sha256:2b9f8532e330d36756f043d0edb30a1c6f5dbc0d3a1ce756ef62df37c13d087a",
+            "direction": "HIGH",
+            "weight": 0.2959350566877177,
+            "transform": "PERCENTILE"
+          }
+        ],
+        "filter_rules": [],
+        "exclude_st": true,
+        "exclude_abnormal_status": true,
+        "minimum_listed_sessions": 120,
+        "target_count": 10,
+        "retention_rank": 20,
+        "rebalance_sessions": 10,
+        "initial_cash_cny": 1000000.0,
+        "minimum_cash_fraction": 0.02,
+        "buy_commission_bps": 2.0,
+        "sell_commission_bps": 2.0,
+        "sell_stamp_duty_bps": 5.0,
+        "historical_sell_stamp_duty_bps": 10.0,
+        "minimum_commission_cny": 5.0,
+        "transfer_fee_bps": 0.1,
+        "historical_transfer_fee_bps": 0.2,
+        "base_slippage_bps": 2.0,
+        "square_root_impact_bps": 20.0,
+        "maximum_slippage_bps": 100.0,
+        "maximum_participation_rate": 0.1,
+        "shadow_health": {
+          "experiment_variant": "S4V3",
+          "drawdown_peak_lookback_sessions": 252,
+          "external_trend_sessions": 200,
+          "external_breadth_return_sessions": 20,
+          "external_strong_breadth": 0.6,
+          "external_weak_breadth": 0.35,
+          "regime_ordinary_drawdown": 0.08,
+          "regime_severe_drawdown": 0.15,
+          "regime_base_exposure": 0.5,
+          "regime_weak_exposure": 0.3,
+          "regime_strong_exposure": 1.0,
+          "regime_down_confirmation_sessions": 2,
+          "regime_up_confirmation_sessions": 5
+        }
+      },
+      "evidence_version": "FROZEN_RESEARCH",
+      "related_evidence": []
+    },
+    {
+      "strategy_id": "factor-sharpe-quarter10",
+      "version": 1,
+      "category": "FACTOR_WEIGHTED",
+      "name": "历史夏普加权 · 季度10股",
+      "notes": "季度末选股，前20名保留；按残余波动率倒数分配，单股上限15%。名义股票目标88.2%，不启用影子择时。",
+      "status": "RESEARCH_CANDIDATE",
+      "schedule": "QUARTER",
+      "allocation": "INVERSE_RESVOL",
+      "fixed_exposure": 0.9,
+      "source_path": "reports/factor_score_research/20261014-quarter10-loss-diagnostics-v2/filters-canonical-v1/runs/QLOSS_BASE.json",
+      "source_sha256": "0f774d5effd793a880d15b11b386f962d56cb0204a54448f68b8e409b7b4ec0a",
+      "request": {
+        "schema_version": "1",
+        "name": "QLOSS_BASE",
+        "start": "2016-01-01",
+        "end": "2026-10-12",
+        "universe_id": "ALL-A-PIT",
+        "universe_segments": [
+          "SH_MAIN",
+          "SZ_MAIN",
+          "CHINEXT",
+          "STAR"
+        ],
+        "selection_sequence_mode": "ACTUAL_POSITIONS",
+        "score_rules": [
+          {
+            "factor_id": "jqdata-share-turnover-monthly",
+            "release_id": "sha256:314f31c2a3029977172892aeea94164bf933a712a3644213dae9b5d3a3ce5d27",
+            "direction": "LOW",
+            "weight": 0.8401716113791217,
+            "transform": "PERCENTILE"
+          },
+          {
+            "factor_id": "jqdata-nonlinear-size",
+            "release_id": "sha256:119a41c94a54ba03a1c1f32a893e19b282c708c0c93f87f82864aa8cff88ffcb",
+            "direction": "HIGH",
+            "weight": 0.7097816976760001,
+            "transform": "PERCENTILE"
+          },
+          {
+            "factor_id": "jqdata-dividend-yield-ttm",
+            "release_id": "sha256:9e162b404e812348cf3b5d335d09585edead497b824bad01dfea77d68abf3758",
+            "direction": "HIGH",
+            "weight": 0.5995525638610454,
+            "transform": "PERCENTILE"
+          },
+          {
+            "factor_id": "jqdata-resvol",
+            "release_id": "sha256:adf0c70b2e856c6280f7324826fed977e177537ce7e74f45204126ceabb4c662",
+            "direction": "LOW",
+            "weight": 0.4786201017413729,
+            "transform": "PERCENTILE"
+          },
+          {
+            "factor_id": "jqdata-book-to-price-ratio",
+            "release_id": "sha256:66d6123af6dddab3be002bd84d0880d0d74e723d18d9ccd7ccd4f177a20aa20f",
+            "direction": "HIGH",
+            "weight": 0.465910093646075,
+            "transform": "PERCENTILE"
+          },
+          {
+            "factor_id": "jqdata-natural-log-of-market-cap",
+            "release_id": "sha256:32e3183a205b3de8e7f4101491fa126e3b1daf4a88d0379c9bb0addc0bc93f5f",
+            "direction": "LOW",
+            "weight": 0.4046888276570272,
+            "transform": "PERCENTILE"
+          },
+          {
+            "factor_id": "jqdata-gross-margin-ttm",
+            "release_id": "sha256:2b9f8532e330d36756f043d0edb30a1c6f5dbc0d3a1ce756ef62df37c13d087a",
+            "direction": "HIGH",
+            "weight": 0.2959350566877177,
+            "transform": "PERCENTILE"
+          }
+        ],
+        "filter_rules": [],
+        "exclude_st": true,
+        "exclude_abnormal_status": true,
+        "minimum_listed_sessions": 120,
+        "target_count": 10,
+        "retention_rank": 20,
+        "rebalance_sessions": 63,
+        "initial_cash_cny": 1000000.0,
+        "minimum_cash_fraction": 0.02,
+        "buy_commission_bps": 2.0,
+        "sell_commission_bps": 2.0,
+        "sell_stamp_duty_bps": 5.0,
+        "historical_sell_stamp_duty_bps": 10.0,
+        "minimum_commission_cny": 5.0,
+        "transfer_fee_bps": 0.1,
+        "historical_transfer_fee_bps": 0.2,
+        "base_slippage_bps": 2.0,
+        "square_root_impact_bps": 20.0,
+        "maximum_slippage_bps": 100.0,
+        "maximum_participation_rate": 0.1,
+        "shadow_health": {
+          "experiment_variant": "S4V3",
+          "drawdown_peak_lookback_sessions": 252,
+          "external_trend_sessions": 200,
+          "external_breadth_return_sessions": 20,
+          "external_strong_breadth": 0.6,
+          "external_weak_breadth": 0.35,
+          "regime_ordinary_drawdown": 0.08,
+          "regime_severe_drawdown": 0.15,
+          "regime_base_exposure": 0.5,
+          "regime_weak_exposure": 0.3,
+          "regime_strong_exposure": 1.0,
+          "regime_down_confirmation_sessions": 2,
+          "regime_up_confirmation_sessions": 5
+        }
+      },
+      "evidence_version": "FROZEN_RESEARCH",
+      "related_evidence": []
+    },
+    {
+      "strategy_id": "bank-quality10-quarter",
+      "version": 3,
+      "category": "BANK",
+      "name": "银行质量门槛＋周期股息 · 10股",
+      "notes": "质量门槛后按周期股息率排序，63个交易日调仓。主证据为2020—2025年修正周期口径复算；旧365天结果单独保留。本页V3统一收盘后信息时钟，最早次交易日成交；归档保留原时钟结果。",
+      "status": "RESEARCH_CANDIDATE",
+      "schedule": "INTERVAL",
+      "allocation": "EQUAL",
+      "fixed_exposure": null,
+      "source_path": "data/quality_strategies/jobs/bank-quality10-quarter--20261014T075519-361ac5.backtest.json",
+      "source_sha256": "794d586f46947abdc4dae012cbda9ac71eab9904bc3f125eae5771f99eba6ae8",
+      "request": {
+        "schema_version": "1",
+        "name": "银行补测·质量门槛后股息率·前10·63日·2020-2025",
+        "start": "2020-01-02",
+        "end": "2025-12-31",
+        "universe_id": "ALL-A-PIT",
+        "universe_segments": [
+          "SH_MAIN",
+          "SZ_MAIN",
+          "CHINEXT",
+          "STAR",
+          "BSE"
+        ],
+        "selection_sequence_mode": "ACTUAL_POSITIONS",
+        "score_rules": [
+          {
+            "factor_id": "bank-quality-dividend-yield-365",
+            "release_id": "sha256:1e24428f957204c9006690963aba6acba9019c2fb62b03cfc14677860c807df7",
+            "direction": "HIGH",
+            "weight": 100.0,
+            "transform": "PERCENTILE"
+          }
+        ],
+        "filter_rules": [],
+        "exclude_st": true,
+        "exclude_abnormal_status": true,
+        "minimum_listed_sessions": 60,
+        "target_count": 10,
+        "retention_rank": 10,
+        "rebalance_sessions": 63,
+        "initial_cash_cny": 1000000.0,
+        "minimum_cash_fraction": 0.02,
+        "buy_commission_bps": 2.0,
+        "sell_commission_bps": 2.0,
+        "sell_stamp_duty_bps": 5.0,
+        "historical_sell_stamp_duty_bps": 10.0,
+        "minimum_commission_cny": 5.0,
+        "transfer_fee_bps": 0.1,
+        "historical_transfer_fee_bps": 0.2,
+        "base_slippage_bps": 2.0,
+        "square_root_impact_bps": 20.0,
+        "maximum_slippage_bps": 100.0,
+        "maximum_participation_rate": 0.1,
+        "shadow_health": {
+          "experiment_variant": "S0",
+          "drawdown_peak_lookback_sessions": 252,
+          "external_trend_sessions": 200,
+          "external_breadth_return_sessions": 20,
+          "external_strong_breadth": 0.6,
+          "external_weak_breadth": 0.35,
+          "regime_ordinary_drawdown": 0.08,
+          "regime_severe_drawdown": 0.15,
+          "regime_base_exposure": 0.5,
+          "regime_weak_exposure": 0.3,
+          "regime_strong_exposure": 1.0,
+          "regime_down_confirmation_sessions": 2,
+          "regime_up_confirmation_sessions": 5
+        }
+      },
+      "evidence_version": "CYCLE_CORRECTED",
+      "related_evidence": [
+        {
+          "path": "reports/strategy_backtests/20261009-192158-d5f6de.result.json",
+          "source_sha256": "e8e9749ab949c36fcbd795d425065fbfec4da9f3818062b3887d4e3d5b868f33",
+          "label": "旧365天股息口径，仅供历史对照"
+        }
+      ],
+      "information_clock": "POSTCLOSE_END_OF_DAY"
+    },
+    {
+      "strategy_id": "bank-quality5-halfyear",
+      "version": 3,
+      "category": "BANK",
+      "name": "银行质量门槛＋周期股息 · 5股",
+      "notes": "质量门槛后按周期股息率排序，126个交易日调仓。主证据为2020—2025年修正周期口径复算；旧365天结果单独保留。五股新版回撤更大，保留为对照。本页V3统一收盘后信息时钟，最早次交易日成交；归档保留原时钟结果。",
+      "status": "RESEARCH_CANDIDATE",
+      "schedule": "INTERVAL",
+      "allocation": "EQUAL",
+      "fixed_exposure": null,
+      "source_path": "data/quality_strategies/jobs/bank-quality5-halfyear--20261014T075108-6069c4.backtest.json",
+      "source_sha256": "2463bd250f753a7b4f7379d00b00fe96ac0f641a4f721add61155f81f558d4b6",
+      "request": {
+        "schema_version": "1",
+        "name": "银行补测·质量门槛后股息率·前5·126日·2020-2025",
+        "start": "2020-01-02",
+        "end": "2025-12-31",
+        "universe_id": "ALL-A-PIT",
+        "universe_segments": [
+          "SH_MAIN",
+          "SZ_MAIN",
+          "CHINEXT",
+          "STAR",
+          "BSE"
+        ],
+        "selection_sequence_mode": "ACTUAL_POSITIONS",
+        "score_rules": [
+          {
+            "factor_id": "bank-quality-dividend-yield-365",
+            "release_id": "sha256:1e24428f957204c9006690963aba6acba9019c2fb62b03cfc14677860c807df7",
+            "direction": "HIGH",
+            "weight": 100.0,
+            "transform": "PERCENTILE"
+          }
+        ],
+        "filter_rules": [],
+        "exclude_st": true,
+        "exclude_abnormal_status": true,
+        "minimum_listed_sessions": 60,
+        "target_count": 5,
+        "retention_rank": 5,
+        "rebalance_sessions": 126,
+        "initial_cash_cny": 1000000.0,
+        "minimum_cash_fraction": 0.02,
+        "buy_commission_bps": 2.0,
+        "sell_commission_bps": 2.0,
+        "sell_stamp_duty_bps": 5.0,
+        "historical_sell_stamp_duty_bps": 10.0,
+        "minimum_commission_cny": 5.0,
+        "transfer_fee_bps": 0.1,
+        "historical_transfer_fee_bps": 0.2,
+        "base_slippage_bps": 2.0,
+        "square_root_impact_bps": 20.0,
+        "maximum_slippage_bps": 100.0,
+        "maximum_participation_rate": 0.1,
+        "shadow_health": {
+          "experiment_variant": "S0",
+          "drawdown_peak_lookback_sessions": 252,
+          "external_trend_sessions": 200,
+          "external_breadth_return_sessions": 20,
+          "external_strong_breadth": 0.6,
+          "external_weak_breadth": 0.35,
+          "regime_ordinary_drawdown": 0.08,
+          "regime_severe_drawdown": 0.15,
+          "regime_base_exposure": 0.5,
+          "regime_weak_exposure": 0.3,
+          "regime_strong_exposure": 1.0,
+          "regime_down_confirmation_sessions": 2,
+          "regime_up_confirmation_sessions": 5
+        }
+      },
+      "evidence_version": "CYCLE_CORRECTED",
+      "related_evidence": [
+        {
+          "path": "reports/strategy_backtests/20261009-192243-595edf.result.json",
+          "source_sha256": "162e3bb6ff962398563b4365f5b118e69ef5a7154841902bff02886f3cecf3c2",
+          "label": "旧365天股息口径，仅供历史对照"
+        }
+      ],
+      "information_clock": "POSTCLOSE_END_OF_DAY"
+    }
+  ]
+}

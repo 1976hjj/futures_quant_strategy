@@ -48,6 +48,9 @@ class DataUpdateManager:
         return False
 
     def start(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from alpha_research_os.portfolio.quality_strategies import QualityStrategyBook
+        if QualityStrategyBook(self.root).running():
+            raise RuntimeError("优质策略正在读取本地数据，请等待计算结束后更新来源")
         request = DataUpdateRequest.model_validate(payload)
         prepared = plan(self.root, request)
         if any(
@@ -65,11 +68,13 @@ class DataUpdateManager:
             paths["request.json"].write_bytes(canonical_json_bytes(request) + b"\n")
             paths["progress.json"].write_bytes(
                 canonical_json_bytes(
-                    {"status": "RUNNING", "phase": "准备更新", "progress": 0},
+                    {"status": "RUNNING", "phase": "准备更新", "progress": 0,
+                     "started_at": datetime.now().astimezone().isoformat()},
                 )
             )
             paths["log"].write_text("", encoding="utf-8")
-            environment = {**os.environ, "PYTHONPATH": os.pathsep.join((str(self.root / "src"), str(self.root)))}
+            environment = {**os.environ, "PYTHONPATH": os.pathsep.join((str(self.root / "src"), str(self.root))),
+                           "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
             if request.source_id == "eastmoney":
                 environment.pop("TUSHARE_TOKEN", None)
             token = tushare_token(self.root) if request.source_id in ("tushare", "industry") else None
@@ -109,7 +114,13 @@ class DataUpdateManager:
             and progress.get("status") == "RUNNING"
         ):
             progress.update({"status": "FAIL", "phase": "进程意外退出", "error": "worker exited without final status"})
-        log = paths["log"].read_text(encoding="utf-8", errors="replace") if paths["log"].exists() else ""
+        raw_log = paths["log"].read_bytes() if paths["log"].exists() else b""
+        try:
+            log = raw_log.decode("utf-8")
+        except UnicodeDecodeError:
+            # Older Windows subprocesses wrote GBK even though their parent log
+            # was opened as UTF-8. New workers explicitly emit UTF-8.
+            log = raw_log.decode("gb18030", errors="replace")
         return {
             "job_id": job_id,
             "request": json.loads(paths["request.json"].read_bytes()),

@@ -62,7 +62,7 @@ def present(value) -> bool:
     return value is not None and not pd.isna(value)
 
 
-def add_lineage(panel: pd.DataFrame, token_evidence: dict | None = None, free_evidence: dict | None = None):
+def add_lineage(panel: pd.DataFrame, token_evidence: dict | None = None, free_evidence: dict | None = None, *, progress_callback=None):
     """Attach exact field origin; supplemental details take precedence over row origin."""
     panel = panel.copy()
     token_evidence = token_evidence or {}
@@ -77,7 +77,7 @@ def add_lineage(panel: pd.DataFrame, token_evidence: dict | None = None, free_ev
     source_columns = {metric: [] for metric in metrics + ["selected_bvps"] if metric in panel}
     unit_columns = {metric: metric_unit(metric) for metric in source_columns}
     lineage_json = []
-    for _, row in panel.iterrows():
+    for row_index, (_, row) in enumerate(panel.iterrows(), 1):
         details = row.get("supplement_details")
         details = json.loads(details) if isinstance(details, str) and details else []
         supplemental = {d["metric"]: d for d in (details or [])}
@@ -155,6 +155,8 @@ def add_lineage(panel: pd.DataFrame, token_evidence: dict | None = None, free_ev
                     "historical_pit_verified": False,
                 }
             )
+        if progress_callback is not None and (row_index % 50 == 0 or row_index == len(panel)):
+            progress_callback(row_index, len(panel), f"已核对来源：{row.code} · {row.report_date}")
     for metric, values in source_columns.items():
         panel[metric + "_source"] = values
         panel[metric + "_unit"] = unit_columns[metric]

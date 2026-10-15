@@ -6,7 +6,9 @@
     "data/features/bank_original_evidence/65fc046b90af3c328c7e08c64fd8efb17f81bf071dbec8d40a1984ad821f5b79/supplemental_financial_facts.parquet",
     "data/features/bank_original_evidence/7ed207483c0bdef5d8ae12a9842a033c59e2a12c90824f0be642af9870f32741/supplemental_financial_facts.parquet",
     "data/features/bank_original_evidence/70771ad8a9627d6db95327e551aa14dd4752784c452d475bf722c0793af74562/supplemental_financial_facts.parquet",
-    "data/features/bank_original_evidence/77443fbfa1da8acf17799f8041d03a100e2748a8e28f4aefb8d6782d85d07c06/supplemental_financial_facts.parquet"
+    "data/features/bank_original_evidence/77443fbfa1da8acf17799f8041d03a100e2748a8e28f4aefb8d6782d85d07c06/supplemental_financial_facts.parquet",
+    "data/features/bank_original_evidence/e3860ad0f854e1a0529047d4dd0da6377b1a45dcd65fa2652ee39bebb5a374ee/supplemental_financial_facts.parquet",
+    "data/features/bank_original_evidence/00016c018c4c54dd6f25c4af013d4f1bf9c74bf2a8b2072c4f8f0b2ee4d37b35/supplemental_financial_facts.parquet"
   ],
   "original_growth_files": [
     "data/features/bank_original_evidence/87b9bc04bf3cdb7701092750a6c22cac57619a5a50d1c707040bcb4de8225779/original_same_report_profit_growth_facts.parquet"

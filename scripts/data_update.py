@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from alpha_research_os.kernel.canonical import canonical_json_bytes
 from scripts.build_m2e_core_warehouse import _projection as m2e_projection
-from scripts.sync_eastmoney_banks import bank_inventory
+from scripts.sync_eastmoney_banks import atomic_json, bank_inventory
 
 GROUPS = {
     "reference": ("证券名册与 PIT 状态", "trade_cal、stock_basic、namechange、stock_st、suspend_d", True),
@@ -93,6 +93,7 @@ class DataUpdateRequest(BaseModel):
     min_free_gb: float = Field(default=10, ge=1, le=500)
     sleep_ms: int = Field(default=50, ge=0, le=5000)
     refresh_recent_periods: int = Field(default=4, ge=0, le=4)
+    bank_update_mode: Literal["AUTO", "FULL"] = "AUTO"
 
     @model_validator(mode="after")
     def validate_selection(self) -> DataUpdateRequest:
@@ -359,8 +360,10 @@ def plan(root: Path, request: DataUpdateRequest) -> dict[str, Any]:
         if group == "financial" and request.refresh_recent_periods > 0:
             needs_update = True
         if group == "bank_industry":
+            from scripts.sync_bank_industry import bank_refresh_policy
+            policy = bank_refresh_policy(root, request.bank_update_mode)
             collected = current.get("last_collected_at") or ""
-            needs_update = needs_update or collected[:10] != date.today().isoformat()
+            needs_update = needs_update or bool(policy["refresh_financial"]) or collected[:10] != date.today().isoformat()
         if group == "bank_free":
             # Report-period end is not acquisition freshness. Refresh the bank
             # snapshots daily, even while the latest disclosed period stays unchanged.
@@ -408,11 +411,20 @@ def plan(root: Path, request: DataUpdateRequest) -> dict[str, Any]:
         "token_available": token_available,
         "can_start": not token_required or token_available,
         "strategy_ready_if_complete": request.source_id == "tushare" and not required_missing,
+        "bank_refresh": bank_refresh_policy(root, request.bank_update_mode) if request.source_id == "industry" else None,
     }
 
 
 def _status(path: Path, **detail: Any) -> None:
-    path.write_bytes(canonical_json_bytes({"updated_at": datetime.now().astimezone().isoformat(), **detail}))
+    current = json.loads(path.read_bytes()) if path.exists() else {}
+    if detail.get("status") == "PASS" and current.get("stages"):
+        for stage in current["stages"]:
+            stage["status"] = "DONE"
+    elif detail.get("status") == "FAIL" and current.get("stages"):
+        for stage in current["stages"]:
+            if stage["id"] == current.get("stage_id"):
+                stage["status"] = "FAIL"
+    atomic_json(path, {**current, **detail, "updated_at": datetime.now().astimezone().isoformat()})
 
 
 def run(root: Path, request: DataUpdateRequest, progress_path: Path, log_path: Path) -> None:
@@ -444,6 +456,10 @@ def run(root: Path, request: DataUpdateRequest, progress_path: Path, log_path: P
                 commands = [
                     [
                         "scripts/sync_bank_industry.py",
+                        "--update-mode",
+                        request.bank_update_mode,
+                        "--progress",
+                        str(progress_path),
                         "--end",
                         end,
                         "--workers",
@@ -578,7 +594,8 @@ def run(root: Path, request: DataUpdateRequest, progress_path: Path, log_path: P
                     )
             for part, command in enumerate(commands, start=1):
                 progress = round((index + (part - 1) / max(1, len(commands))) / max(1, len(selected)) * 100)
-                environment = {**os.environ, "PYTHONPATH": os.pathsep.join((str(root / "src"), str(root)))}
+                environment = {**os.environ, "PYTHONPATH": os.pathsep.join((str(root / "src"), str(root))),
+                               "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
                 for attempt in range(1, MAX_TRANSIENT_ATTEMPTS + 1):
                     _status(
                         progress_path,

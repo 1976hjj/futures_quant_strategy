@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date
 from pathlib import Path
 
@@ -81,7 +82,23 @@ def eligible_bank_market(connection, start: date, end: date):
         ORDER BY u.ts_code,u.trade_date""", [start, end, *codes]).df()
 
 
-def source_inputs(root: Path, start: date, end: date):
+def bank_lineage_as_of(connection, end: date, cutoff):
+    """Use all published immutable versions, restricted to their true known time."""
+    schemas = connection.execute("""SELECT table_schema FROM information_schema.tables
+        WHERE table_name='bank_metric_lineage' AND table_type='BASE TABLE'""").fetchall()
+    tables = ['"main"."bank_metric_lineage"']
+    tables += [f'"{schema}"."bank_metric_lineage"' for (schema,) in schemas
+               if re.fullmatch(r"run_\d{8}_\d{6}_[0-9a-f]{6}", schema)]
+    queries, parameters = [], []
+    for table in tables:
+        queries.append(f"""SELECT * FROM {table} WHERE try_cast(report_date AS DATE)<=?
+            AND try_cast(available_at AS TIMESTAMPTZ)<=?
+            AND (historical_pit_verified OR try_cast(retrieved_at AS TIMESTAMPTZ)<=?)""")
+        parameters.extend([end, cutoff.to_pydatetime(), cutoff.to_pydatetime()])
+    return connection.execute(" UNION ALL BY NAME ".join(queries), parameters).df().drop_duplicates()
+
+
+def source_inputs(root: Path, start: date, end: date, information_cutoff=None):
     config = json.loads((root / "config/bank_factors.json").read_text(encoding="utf-8"))
     frames = []
     for relative in config["original_fact_files"]:
@@ -108,10 +125,11 @@ def source_inputs(root: Path, start: date, end: date):
         frames.append(frame)
     with duckdb.connect(str(root / "data/warehouse/bank_token.duckdb"), read_only=True) as c:
         cutoff = pd.Timestamp(end, tz="Asia/Shanghai") + pd.Timedelta(hours=15)
-        lineage = c.execute("""SELECT * FROM bank_metric_lineage WHERE try_cast(report_date AS DATE)<=?
-            AND try_cast(available_at AS TIMESTAMPTZ)<=?
-            AND (historical_pit_verified OR try_cast(retrieved_at AS TIMESTAMPTZ)<=?)""",
-                            [end, cutoff.to_pydatetime(), cutoff.to_pydatetime()]).df()
+        if information_cutoff is not None:
+            cutoff = pd.Timestamp(information_cutoff)
+            if cutoff.tzinfo is None or cutoff.tz_convert("Asia/Shanghai").date() != end:
+                raise ValueError("bank information cutoff must be timezone-aware and within the requested day")
+        lineage = bank_lineage_as_of(c, end, cutoff)
         events = c.execute("SELECT * FROM bank_dividend_events WHERE try_cast(ex_date AS DATE)<=?", [end]).df()
         coverage = {row[0] for row in c.execute("SELECT DISTINCT ts_code FROM dividend").fetchall()}
     lineage["metric"] = lineage.metric.replace(METRIC_MAP)
@@ -327,7 +345,12 @@ def per_share_invalidations(bars, events):
     return result
 
 
-def build_features(facts, events, market, capitals, coverage):
+def build_features(facts, events, market, capitals, coverage, information_cutoff=None, post_close=False):
+    if information_cutoff is not None:
+        information_cutoff = pd.Timestamp(information_cutoff)
+        if (information_cutoff.tzinfo is None or market.session.nunique() != 1
+                or information_cutoff.tz_convert("Asia/Shanghai").date() != market.session.iloc[0]):
+            raise ValueError("custom bank information cutoff is only valid for a single matching market day")
     records = []
     for code, bars in market.groupby("instrument_id", sort=True):
         ff = facts[facts.code == code].sort_values('available_at').reset_index(drop=True)
@@ -340,6 +363,10 @@ def build_features(facts, events, market, capitals, coverage):
         for bar in bars.itertuples():
             day = bar.session
             cut = pd.Timestamp(day).tz_localize("Asia/Shanghai") + pd.Timedelta(hours=15)
+            if post_close:
+                cut = pd.Timestamp(day).tz_localize("Asia/Shanghai") + pd.Timedelta(hours=23, minutes=59, seconds=59)
+            if information_cutoff is not None:
+                cut = information_cutoff
             size = int(np.searchsorted(available, cut.value, side='right'))
             day_number = (day - date(1970, 1, 1)).days
             fresh = ((report_days[:size] >= day_number - MAX_REPORT_AGE_DAYS)

@@ -48,6 +48,7 @@ from scripts.data_update import DataUpdateRequest  # noqa: E402
 from scripts.data_update import inventory as data_inventory  # noqa: E402
 from scripts.data_update import plan as data_plan  # noqa: E402
 from scripts.data_update_api import DataUpdateManager  # noqa: E402
+from alpha_research_os.portfolio.quality_strategies import QualityStrategyBook  # noqa: E402
 
 
 def strategy_options(project_root: Path) -> dict[str, Any]:
@@ -893,10 +894,28 @@ class StrategyJobManager:
 
 def make_handler(project_root: Path, origins: set[str], manager: StrategyJobManager,
                  data_manager: DataUpdateManager | None = None):
+    quality_book = QualityStrategyBook(project_root)
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
             path = parsed.path
+            if path.startswith("/api/v1/quality-strategies"):
+                try:
+                    parts = path.strip("/").split("/")
+                    if parts == ["api", "v1", "quality-strategies"]:
+                        category = (parse_qs(parsed.query).get("category") or [None])[0]
+                        self._json(HTTPStatus.OK, quality_book.list(category))
+                    elif len(parts) == 5 and parts[:4] == ["api", "v1", "quality-strategies", "jobs"]:
+                        self._json(HTTPStatus.OK, quality_book.job(parts[4]))
+                    elif len(parts) == 4 and parts[:3] == ["api", "v1", "quality-strategies"]:
+                        self._json(HTTPStatus.OK, quality_book.detail(parts[3]))
+                    else:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": "NOT_FOUND"})
+                except FileNotFoundError:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "STRATEGY_OR_EVIDENCE_NOT_FOUND"})
+                except ValueError as error:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "INVALID_QUALITY_QUERY", "detail": str(error)})
+                return
             if path == "/api/v1/health":
                 self._json(HTTPStatus.OK, {"status": "ok", "service": "strategy-backtest"})
                 return
@@ -964,6 +983,16 @@ def make_handler(project_root: Path, origins: set[str], manager: StrategyJobMana
             try:
                 payload = self._body()
                 parts = path.strip("/").split("/")
+                if path == "/api/v1/quality-strategies":
+                    self._json(HTTPStatus.CREATED, quality_book.register(payload))
+                    return
+                if len(parts) == 5 and parts[:3] == ["api", "v1", "quality-strategies"] and parts[4] == "calculate":
+                    if manager.running() or manager.has_pending() or (data_manager is not None and data_manager.running()):
+                        raise RuntimeError("已有回测或数据更新任务，请等待完成后计算优质策略")
+                    self._json(HTTPStatus.ACCEPTED, quality_book.calculate(parts[3], payload))
+                    return
+                if quality_book.running() and path in ("/api/v1/data/jobs", "/api/v1/strategy/jobs", "/api/v1/rotation/jobs"):
+                    raise RuntimeError("优质策略正在计算，请等待完成后启动其他任务")
                 if path == "/api/v1/data/plan":
                     self._json(HTTPStatus.OK, data_plan(project_root, DataUpdateRequest.model_validate(payload)))
                     return
